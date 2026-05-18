@@ -1,0 +1,2 @@
+# Python deps for scripts/crm-preflight.py (Chrome CDP over websockets).
+websockets>=12.0
