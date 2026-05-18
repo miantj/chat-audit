@@ -1,0 +1,62 @@
+{
+  "name": "chat-audit-export",
+  "version": "1.0.0",
+  "description": "一手聊天审计导出工具",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "prestart": "node scripts/ensure-deps.cjs",
+    "start": "electron .",
+    "rebuild:electron": "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ pnpm rebuild electron",
+    "build": "electron-builder --win --x64",
+    "build:mac": "electron-builder --mac --x64",
+    "build:dir": "electron-builder --win --x64 --dir"
+  },
+  "build": {
+    "appId": "com.yishou.chat-audit-export",
+    "productName": "一手聊天审计导出",
+    "extraResources": [
+      {
+        "from": "../chat-audit-export/scripts",
+        "to": "scripts",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "category": "public.app-category.business",
+      "icon": "build/icon.icns"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "pnpm": {
+    "nodeLinker": "hoisted"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "electron-log": "^5.0.0",
+    "ws": "^8.18.0"
+  }
+}

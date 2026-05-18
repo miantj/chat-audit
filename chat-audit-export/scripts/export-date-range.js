@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { exportCurrentPage } from './export-current-page.js';
 import { getDefaultCheckpointPath } from './lib/checkpoint.js';
@@ -129,7 +130,9 @@ const targetKeywords = (typeof opts.keywords === 'string' ? opts.keywords : '小
 
 // Graceful shutdown state
 let shutdownRequested = false;
-const PAUSE_FILE = '/tmp/chat-audit-export-pause';
+const PAUSE_FILE =
+  process.env.CHAT_AUDIT_PAUSE_FILE ||
+  path.join(os.tmpdir(), 'chat-audit-export-pause');
 
 process.on('SIGTERM', () => { shutdownRequested = true; console.error(JSON.stringify({event:'export-signal',signal:'SIGTERM',message:'收到终止信号，完成当前对话后退出…'})); });
 process.on('SIGINT', () => { shutdownRequested = true; console.error(JSON.stringify({event:'export-signal',signal:'SIGINT',message:'收到中断信号，完成当前对话后退出…'})); });

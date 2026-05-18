@@ -1,0 +1,230 @@
+import electron from 'electron';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { EventEmitter } from 'node:events';
+import log from 'electron-log';
+import { Orchestrator } from './src/orchestrator/orchestrator.js';
+import { loadSettings, saveSettings } from './src/lib/settings.js';
+import {
+  clearExportSignals,
+  PAUSE_FILE,
+  STOP_FILE
+} from './src/lib/signal-files.js';
+import {
+  ensureAuditChrome,
+  DEFAULT_CDP
+} from './src/lib/cdp-probe.js';
+
+const { app, BrowserWindow, ipcMain, dialog } = electron;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+log.transports.file.level = 'info';
+log.transports.console.level = 'info';
+
+let mainWindow = null;
+let activeOrchestrator = null;
+let exportRunning = false;
+
+function userDataDir() {
+  return app.getPath('userData');
+}
+
+function sendToRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
+function normalizeExportOptions(raw) {
+  const start = raw.start ?? raw.startDate ?? raw.exportDate;
+  const end = raw.end ?? raw.endDate ?? start;
+  return {
+    start,
+    end,
+    startDate: start,
+    endDate: end,
+    department: raw.department,
+    outputDir: raw.outputDir
+  };
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 900,
+    height: 700,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false
+    },
+    title: '一手聊天审计导出',
+    backgroundColor: '#ffffff'
+  });
+
+  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
+
+async function initChromeInBackground() {
+  try {
+    sendToRenderer('chrome-status', {
+      ready: false,
+      message: '正在连接专用 Chrome…'
+    });
+    const started = await ensureAuditChrome(DEFAULT_CDP);
+    sendToRenderer('chrome-status', {
+      ready: started,
+      message: started
+        ? '专用 Chrome 已就绪；若见登录页请在此窗口登录（~/.chrome-chat-audit-profile 会保留登录态）'
+        : 'Chrome 启动失败，导出时将重试'
+    });
+  } catch (err) {
+    log.warn('initChromeInBackground:', err);
+    sendToRenderer('chrome-status', {
+      ready: false,
+      message: err.message
+    });
+  }
+}
+
+app.whenReady().then(() => {
+  clearExportSignals();
+  createWindow();
+  mainWindow.webContents.once('did-finish-load', () => {
+    initChromeInBackground();
+  });
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
+});
+
+ipcMain.handle('start-export', async (_event, rawOptions) => {
+  if (exportRunning) {
+    return { success: false, error: '导出任务正在进行中' };
+  }
+
+  const options = normalizeExportOptions(rawOptions);
+  log.info('start-export called with options:', options);
+
+  if (!options.outputDir) {
+    return { success: false, error: '请先选择输出目录' };
+  }
+  if (!options.start || !options.end) {
+    return { success: false, error: '请填写开始日期和结束日期' };
+  }
+
+  clearExportSignals();
+  exportRunning = true;
+
+  const emitter = new EventEmitter();
+  activeOrchestrator = new Orchestrator(options, emitter);
+
+  emitter.on('progress', (data) => sendToRenderer('export-progress', data));
+  emitter.on('complete', (data) => {
+    exportRunning = false;
+    activeOrchestrator = null;
+    sendToRenderer('export-complete', data);
+  });
+  emitter.on('error', (data) => {
+    exportRunning = false;
+    activeOrchestrator = null;
+    const message =
+      typeof data === 'string' ? data : data?.message || '导出失败';
+    sendToRenderer('export-error', { message });
+  });
+
+  activeOrchestrator
+    .start()
+    .catch((error) => {
+      log.error('start-export error:', error);
+      exportRunning = false;
+      activeOrchestrator = null;
+      sendToRenderer('export-error', { message: error.message });
+    });
+
+  return { success: true, started: true };
+});
+
+ipcMain.handle('pause-export', async () => {
+  try {
+    fs.writeFileSync(PAUSE_FILE, '');
+    if (activeOrchestrator) activeOrchestrator.pause();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('resume-export', async () => {
+  try {
+    if (fs.existsSync(PAUSE_FILE)) fs.unlinkSync(PAUSE_FILE);
+    if (activeOrchestrator) await activeOrchestrator.resumeAll();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('stop-export', async () => {
+  try {
+    fs.writeFileSync(STOP_FILE, '');
+    if (activeOrchestrator) activeOrchestrator.stop();
+    exportRunning = false;
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('get-settings', async () => loadSettings(userDataDir()));
+
+ipcMain.handle('save-settings', async (_event, settings) => {
+  await saveSettings(userDataDir(), settings);
+  return { success: true };
+});
+
+ipcMain.handle('open-directory', async (event) => {
+  try {
+    const saved = await loadSettings(userDataDir());
+    const parent =
+      BrowserWindow.fromWebContents(event.sender) ?? mainWindow ?? undefined;
+    if (parent && !parent.isDestroyed()) {
+      parent.focus();
+    }
+    const defaultPath =
+      saved.outputDir && fs.existsSync(saved.outputDir)
+        ? saved.outputDir
+        : app.getPath('documents');
+    const dialogOptions = {
+      title: '选择输出目录',
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath
+    };
+    const result = parent
+      ? await dialog.showOpenDialog(parent, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+    if (result.canceled || !result.filePaths?.length) {
+      return { canceled: true };
+    }
+    const chosen = result.filePaths[0];
+    await saveSettings(userDataDir(), { ...saved, outputDir: chosen });
+    return { canceled: false, path: chosen };
+  } catch (error) {
+    log.error('open-directory error:', error);
+    return { canceled: true, error: error.message };
+  }
+});

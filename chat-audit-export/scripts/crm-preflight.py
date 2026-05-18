@@ -14,6 +14,7 @@ import base64
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
@@ -44,6 +45,88 @@ def _pick_page_target(targets: list[dict[str, Any]], prefer_tmscrm: bool) -> Opt
             if "tmscrm" in (t.get("url") or ""):
                 return t
     return pages[0]
+
+
+def _pick_preferred_crm_page(targets: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """优先已登录的 chatAudit 标签，避免误选 #/login 空白页。"""
+    pages = [
+        t
+        for t in targets
+        if t.get("type") == "page"
+        and t.get("webSocketDebuggerUrl")
+        and "tmscrm" in (t.get("url") or "")
+    ]
+    if not pages:
+        return _pick_page_target(targets, prefer_tmscrm=True) or _pick_page_target(
+            targets, prefer_tmscrm=False
+        )
+
+    def _score(t: dict[str, Any]) -> int:
+        url = (t.get("url") or "").lower()
+        score = 0
+        if "chataudit" in url.replace("_", ""):
+            score += 100
+        if "/login" in url or url.endswith("#/login"):
+            score -= 80
+        return score
+
+    pages.sort(key=_score, reverse=True)
+    return pages[0]
+
+
+def _ensure_page_target(cdp_base: str, open_url: str = CHAT_AUDIT_HASH) -> dict[str, Any]:
+    """若 CDP 无 page 目标（例如用户关光了标签），用 PUT /json/new 打开 CRM。"""
+    targets = _list_targets(cdp_base)
+    page = _pick_preferred_crm_page(targets)
+    if page:
+        return page
+    new_url = cdp_base.rstrip("/") + "/json/new?" + urllib.parse.quote(open_url, safe="")
+    req = urllib.request.Request(new_url, method="PUT")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        created = json.loads(resp.read().decode())
+    if not created.get("webSocketDebuggerUrl"):
+        print("ERROR: PUT /json/new 未返回可调试的标签页", file=sys.stderr)
+        raise SystemExit(1)
+    return created
+
+
+_ROW_COUNT_EXPR = (
+    "document.querySelectorAll('.el-table__body-wrapper .el-table__row').length"
+)
+
+
+async def _pick_crm_page_with_rows(
+    cdp_base: str, *, min_rows: int = 1
+) -> Optional[dict[str, Any]]:
+    """Pick the tmscrm tab that already has the most employee table rows (avoids empty new tabs)."""
+    targets = _list_targets(cdp_base)
+    pages = [
+        t
+        for t in targets
+        if t.get("type") == "page"
+        and t.get("webSocketDebuggerUrl")
+        and "tmscrm" in (t.get("url") or "")
+    ]
+    if not pages:
+        return _pick_page_target(targets, prefer_tmscrm=True)
+
+    best: Optional[dict[str, Any]] = None
+    best_rows = -1
+    for page in pages:
+        try:
+            async with CDPSession(page["webSocketDebuggerUrl"]) as sess:
+                await sess.send("Runtime.enable", {})
+                n = await sess.evaluate(_ROW_COUNT_EXPR)
+            count = int(n) if isinstance(n, (int, float)) else 0
+        except Exception:
+            count = 0
+        if count > best_rows:
+            best_rows = count
+            best = page
+
+    if best is not None and best_rows >= min_rows:
+        return best
+    return _pick_page_target(targets, prefer_tmscrm=True)
 
 
 def _credentials(args: argparse.Namespace) -> tuple[str, str]:
@@ -112,11 +195,7 @@ class CDPSession:
 
 
 async def cmd_check_page(cdp_base: str) -> None:
-    targets = _list_targets(cdp_base)
-    page = _pick_page_target(targets, prefer_tmscrm=True)
-    if not page:
-        print("ERROR: No page target")
-        raise SystemExit(1)
+    page = _ensure_page_target(cdp_base)
     async with CDPSession(page["webSocketDebuggerUrl"]) as sess:
         await sess.send("Page.enable", {})
         await sess.send("Runtime.enable", {})
@@ -148,10 +227,7 @@ async def cmd_navigate_login(cdp_base: str) -> None:
 
 
 async def cmd_navigate_audit(cdp_base: str) -> None:
-    targets = _list_targets(cdp_base)
-    page = _pick_page_target(targets, prefer_tmscrm=True) or _pick_page_target(targets, prefer_tmscrm=False)
-    if not page:
-        raise SystemExit(1)
+    page = _ensure_page_target(cdp_base)
     async with CDPSession(page["webSocketDebuggerUrl"]) as sess:
         await sess.send("Page.enable", {})
         await sess.send("Runtime.enable", {})
@@ -719,6 +795,52 @@ async def cmd_close_dialog(cdp_base: str) -> None:
     print(result)
 
 
+async def cmd_get_employees(cdp_base: str) -> int:
+    """Extract employee rows from the main table for the orchestrator."""
+    expr = """
+(function(){
+    var rows = document.querySelectorAll('.el-table__body-wrapper .el-table__row');
+    var result = [];
+    for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var cells = row.querySelectorAll('td');
+        if (cells.length < 2) continue;
+        var nameCell = cells[0];
+        var nameEl = nameCell.querySelector('.cell');
+        var name = nameEl ? (nameEl.innerText || '').trim() : '';
+        if (!name) continue;
+        // Extract ID from row data attributes or cells
+        var rowId = row.getAttribute('data-id') || '';
+        var idCell = cells[1];
+        var idEl = idCell ? (idCell.querySelector('.cell') || {}).innerText || '' : '';
+        result.push({
+            name: name,
+            id: rowId || idEl.trim(),
+            rowIndex: i
+        });
+    }
+    return JSON.stringify(result);
+})()
+"""
+    page = await _pick_crm_page_with_rows(cdp_base, min_rows=1)
+    if not page:
+        print("ERROR: No tmscrm page", file=sys.stderr)
+        return 1
+    async with CDPSession(page["webSocketDebuggerUrl"]) as sess:
+        await sess.send("Runtime.enable", {})
+        raw = await sess.evaluate(expr)
+    try:
+        employees = json.loads(raw)
+    except Exception:
+        print(f"ERROR: Failed to parse employee list", file=sys.stderr)
+        return 1
+    if not employees:
+        print("[]")
+        return 0
+    print(json.dumps(employees, ensure_ascii=False))
+    return 0
+
+
 async def cmd_gate_check(cdp_base: str, expect_dept: str, expect_date: Optional[str]) -> int:
     expr = """
 (function(){
@@ -732,8 +854,7 @@ async def cmd_gate_check(cdp_base: str, expect_dept: str, expect_date: Optional[
     return JSON.stringify({dates: dates, department: selected, rowCount: rows.length});
 })()
 """
-    targets = _list_targets(cdp_base)
-    page = _pick_page_target(targets, prefer_tmscrm=True)
+    page = await _pick_crm_page_with_rows(cdp_base, min_rows=0)
     if not page:
         print("ERROR: No tmscrm page")
         return 1
@@ -847,6 +968,9 @@ def main() -> None:
     p_start.add_argument("--expect-dept", default="大客私域顾问-总", help="Expected single cascader tag.")
     p_start.add_argument("--expect-date", default=None, help="Expected main table single day.")
 
+    p_emp = sub.add_parser("get-employees", help="Get employee list from main table.")
+    _add_cdp_arg(p_emp)
+
     args = parser.parse_args()
     cdp = args.cdp
 
@@ -881,6 +1005,8 @@ def main() -> None:
             return await cmd_diagnose_state(cdp, args.expect_dept, args.expect_date)
         elif args.cmd == "gate-start-export":
             return await cmd_gate_start_export(cdp, args.expect_dept, args.expect_date)
+        elif args.cmd == "get-employees":
+            return await cmd_get_employees(cdp)
         return None
 
     try:
