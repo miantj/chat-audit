@@ -175,10 +175,10 @@ The wrapper script:
 3. Diagnoses page state on failure before choosing recovery
 4. Detects blocking error type from `export-error` output and diagnosed state
 5. Attempts self-heal (tab reopen / cascader cleanup / page reload — **not** killing Chrome when CDP is up) for self-healable errors
-6. Retries up to 3 times for the same error type
-7. Writes lesson notes to `docs/solutions/integration-issues/chat-audit-self-iter-YYYY-MM-DD.md` after 3 failures
+6. Retries up to 2 times for the same error type
+7. Writes lesson notes to `docs/solutions/integration-issues/chat-audit-self-iter-YYYY-MM-DD.md` after 2 failures
 8. For `WXWORK_LOGIN_EXPIRED` (selected customer shows WeCom login), stops immediately without CDP “restart” self-heal.
-9. After a successful pass, if `failed_conversation_ids` is non-empty, automatically runs up to **3** more passes with `--retry-failed --fast` (Electron uses the same wrapper). No infinite loop: stops after 3 failed-list retries even if some IDs remain failed.
+9. After a successful pass, if `failed_conversation_ids` is non-empty, automatically runs up to **2** more passes with `--retry-failed --fast` (Electron uses the same wrapper). Pass count is persisted in `chat-audit-YYYY-MM-DD.failed-retry-meta.json` next to the JSON so repeated「开始导出」does not reset the budget. Delete that meta file (or run a full export without `--retry-failed`) to reset. Stops after 2 failed-list retries even if some IDs remain failed.
 10. After all passes finish (including failed retries), runs `json-to-csv-business.js` → `chat-audit-YYYY-MM-DD.business.csv` next to the JSON (uses JSONL when JSON > ~30MB).
 
 **Handling enterprise WeChat login expiry (WXWORK_LOGIN_EXPIRED):**
@@ -311,13 +311,13 @@ The `export-with-self-heal.sh` wrapper adds automatic retry and self-improvement
 | Error type | Self-healable | Max retries |
 |---|---|---|
 | `WXWORK_LOGIN_EXPIRED` | ❌ Human required | — |
-| `CDP_NO_TARGET` | ✅ Restart Chrome CDP | 3 |
-| `CASCADER_STUCK_OPEN` | ✅ Remove dropdown DOM | 3 |
-| `EXPORT_PAGE_CRASH` | ✅ Reload + re-apply filters | 3 |
-| `DATE_PICKER_STUCK` | ✅ Just retry | 3 |
+| `CDP_NO_TARGET` | ✅ Restart Chrome CDP | 2 |
+| `CASCADER_STUCK_OPEN` | ✅ Remove dropdown DOM | 2 |
+| `EXPORT_PAGE_CRASH` | ✅ Reload + re-apply filters | 2 |
+| `DATE_PICKER_STUCK` | ✅ Just retry | 2 |
 | `UNKNOWN` | ⚠️ May retry | 2 |
 
-After 3 consecutive failures of the same type, the script:
+After 2 consecutive failures of the same type, the script:
 1. Writes lesson notes to `docs/solutions/integration-issues/chat-audit-self-iter-YYYY-MM-DD.md`
 2. Exits with code 1 and a summary
 3. Clears retry state so next run starts fresh

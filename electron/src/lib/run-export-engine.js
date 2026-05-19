@@ -4,6 +4,10 @@ import fs from 'node:fs';
 import { getScriptsDir, getSkillRoot } from './paths.js';
 import { PAUSE_FILE, STOP_FILE } from './signal-files.js';
 import { DEFAULT_CDP } from './cdp-probe.js';
+import {
+  FAILED_RETRY_MAX,
+  readFailedRetryPassesUsed
+} from './failed-retry-meta.js';
 
 const LARGE_JSON_BYTES = 40 * 1024 * 1024;
 
@@ -139,7 +143,21 @@ export function runExportEngine(options, eventEmitter) {
   ];
 
   const failedCount = countFailedConversations(outputPath);
-  const resumeFailedOnly = failedCount > 0 && options.fullExport !== true;
+  const retryPassesUsed = readFailedRetryPassesUsed(outputPath);
+  const retryBudgetLeft =
+    FAILED_RETRY_MAX - Math.min(retryPassesUsed, FAILED_RETRY_MAX);
+  const resumeFailedOnly =
+    failedCount > 0 &&
+    options.fullExport !== true &&
+    retryBudgetLeft > 0;
+  if (failedCount > 0 && options.fullExport !== true && retryBudgetLeft <= 0) {
+    eventEmitter?.emit('progress', {
+      current: 0,
+      total: failedCount,
+      message:
+        `仍有 ${failedCount} 条失败会话，已自动补跑 ${FAILED_RETRY_MAX} 次，本次改为全量导出（不再续传失败列表）。`
+    });
+  }
   if (resumeFailedOnly) {
     shellArgs.push('--retry-failed');
     eventEmitter?.emit('progress', {
@@ -148,7 +166,7 @@ export function runExportEngine(options, eventEmitter) {
       reset: true,
       unit: 'conversation',
       phase: 'retry-failed',
-      message: `续传 0/${failedCount}（仅重试失败会话）`
+      message: `续传 0/${failedCount}（失败列表补跑剩余 ${retryBudgetLeft}/${FAILED_RETRY_MAX} 次）`
     });
   }
 

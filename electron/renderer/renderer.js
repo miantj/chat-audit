@@ -525,7 +525,7 @@ onExportComplete((data) => {
     setUIState('idle', { keepProgress: true, showProgress: true });
   }
   if (data.failed > 0) {
-    addLog(`仍有 ${data.failed} 条会话失败（已自动补跑最多 3 次）`, 'info');
+    addLog(`仍有 ${data.failed} 条会话失败（已自动补跑最多 2 次）`, 'info');
   }
   addLog(`JSON: ${data.outputPath || ''}`, 'success');
   if (data.csvPath) {

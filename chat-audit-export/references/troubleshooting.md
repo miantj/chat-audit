@@ -24,7 +24,7 @@ Use when `export-error` appears, gate-check fails, or runs stall.
    - **`dialog filters mismatch`** — Page filters wrong; re-run `check-dates` / `set-dates` and `gate-check`.
    - **`message iframe target not found`** — Iframe slow or login expired; re-run is safe if login is confirmed (checkpoint skips completed work).
    - **`target not found`** / **`friend-missing`** — Transient UI; script often auto-skips; retry export.
-3. For non-login errors, retry the **same** `node scripts/export-date-range.js ...` command up to **3** times.
+3. For non-login errors, retry the **same** `node scripts/export-date-range.js ...` command up to **2** times.
 4. If still failing, stop and report the issue to the user.
 5. **Zombie Node processes:** `pgrep -fl export-date-range`; use `kill -9` if needed. Multiple processes on one CDP port corrupt dialogs.
 6. **Pause / resume / stop:** See main SKILL control table (`/tmp/chat-audit-export-pause`, `kill -9`).

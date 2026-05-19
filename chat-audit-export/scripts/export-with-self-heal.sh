@@ -7,9 +7,9 @@
 # Self-iteration loop:
 #   1. Run export-date-range.js
 #   2. On failure, detect blocking error type
-#   3. If self-healable and retry count < 3: attempt self-heal → retry
+#   3. If self-healable and retry count < 2: attempt self-heal → retry
 #   4. If non-self-healable (e.g. WeChat login): stop and ask user to re-login
-#   5. If retry count >= 3 for same error: stop, summarize, write to knowledge base
+#   5. If retry count >= 2 for same error: stop, summarize, write to knowledge base
 #
 # State is persisted in /tmp/chat-audit-self-heal-state.json between runs.
 # Clear state with: rm /tmp/chat-audit-self-heal-state.json
@@ -357,10 +357,49 @@ EOF
 # Main self-iteration loop
 # ------------------------------------------------------------------
 
-MAX_RETRIES=3
-FAILED_RETRY_MAX=3
-failed_retry_count=0
+MAX_RETRIES=2
+FAILED_RETRY_MAX=2
+FAILED_RETRY_META="${EXPORT_OUT%.json}.failed-retry-meta.json"
 attempt=0
+
+read_failed_retry_passes() {
+  if [[ ! -f "$FAILED_RETRY_META" ]]; then
+    echo 0
+    return
+  fi
+  FAILED_RETRY_META="$FAILED_RETRY_META" python3 -c "
+import json, os
+p = os.environ['FAILED_RETRY_META']
+try:
+    print(int(json.load(open(p)).get('passes_used', 0) or 0))
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0"
+}
+
+write_failed_retry_passes() {
+  local n="$1"
+  FAILED_RETRY_META="$FAILED_RETRY_META" PASSES_USED="$n" python3 -c "
+import json, os
+from datetime import datetime, timezone
+p = os.environ['FAILED_RETRY_META']
+n = int(os.environ['PASSES_USED'])
+json.dump(
+    {'passes_used': n, 'updated_at': datetime.now(timezone.utc).isoformat()},
+    open(p, 'w'),
+)
+" 2>/dev/null || true
+}
+
+clear_failed_retry_meta() {
+  rm -f "$FAILED_RETRY_META"
+}
+
+# 全量导出（非 --retry-failed）开始时清零补跑计数；续传失败列表则沿用 meta
+if [[ -z "$RETRY_FAILED" ]]; then
+  clear_failed_retry_meta
+fi
+failed_retry_count=$(read_failed_retry_passes)
 
 failed_count_from_output() {
   local output="$1"
@@ -404,10 +443,11 @@ maybe_schedule_failed_retry() {
     return 1
   fi
   if [[ "$failed_retry_count" -ge "$FAILED_RETRY_MAX" ]]; then
-    echo "⚠️  ${failed_count} conversation(s) still failed after ${FAILED_RETRY_MAX} failed-list retry pass(es)."
+    echo "⚠️  ${failed_count} conversation(s) still failed after ${FAILED_RETRY_MAX} failed-list retry pass(es). No more auto retry (see ${FAILED_RETRY_META})."
     return 1
   fi
   failed_retry_count=$((failed_retry_count + 1))
+  write_failed_retry_passes "$failed_retry_count"
   echo "⚠️  ${failed_count} conversation(s) failed; scheduling failed-list retry ${failed_retry_count}/${FAILED_RETRY_MAX}..."
   RETRY_FAILED="--retry-failed"
   EXPORT_FAST="--fast"
@@ -435,6 +475,10 @@ while true; do
   attempt=$((attempt + 1))
   if [[ "$attempt" -gt "$MAX_LOOP" ]]; then
     echo "ERROR: exceeded max loop iterations ($MAX_LOOP)"
+    exit 1
+  fi
+  if [[ -n "$RETRY_FAILED" ]] && [[ "$failed_retry_count" -ge "$FAILED_RETRY_MAX" ]]; then
+    echo "ERROR: failed-list retry budget exhausted (${failed_retry_count}/${FAILED_RETRY_MAX}). Delete ${FAILED_RETRY_META} or run a full export to reset."
     exit 1
   fi
   echo ""
@@ -476,7 +520,11 @@ while true; do
     echo "✅ Export completed successfully!"
     clear_state
     if maybe_schedule_failed_retry "$output"; then
+      failed_retry_count=$(read_failed_retry_passes)
       continue
+    fi
+    if [[ "$(count_failed_conversations)" -le 0 ]]; then
+      clear_failed_retry_meta
     fi
     generate_business_csv
     mark_done
