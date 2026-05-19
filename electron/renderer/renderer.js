@@ -305,8 +305,18 @@ onExportComplete((data) => {
   const elapsed = data.elapsed != null ? `，耗时 ${data.elapsed}s` : '';
   const total =
     data.total != null && data.total > 0 ? `，共 ${data.total} 条会话` : '';
-  addLog(`导出完成${elapsed}${total}`, 'success');
-  addLog(`输出: ${data.outputPath || ''}`, 'success');
+  if (data.shutdown) {
+    addLog(`导出已停止（进度已保存）${elapsed}${total}`, 'info');
+  } else {
+    addLog(`导出完成${elapsed}${total}`, 'success');
+  }
+  if (data.failed > 0) {
+    addLog(`仍有 ${data.failed} 条会话失败（已自动补跑最多 3 次）`, 'info');
+  }
+  addLog(`JSON: ${data.outputPath || ''}`, 'success');
+  if (data.csvPath) {
+    addLog(`CSV: ${data.csvPath}`, 'success');
+  }
   progressFill.style.width = '100%';
   progressText.textContent = '100%';
 });
@@ -342,6 +352,7 @@ restoreFormSettings()
     }
     addLog(`默认导出日期：${startDate.value}（本地时区）`, 'info');
     addLog('工具已就绪；请在专用 Chrome 窗口登录 CRM（非日常浏览器），关闭后重开仍保留登录态');
+    addLog('导出已启用温和加速（paced 等待约为 Skill 默认一半）');
   })
   .catch((err) => {
     addLog(`加载设置失败: ${err.message}`, 'error');

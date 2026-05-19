@@ -351,6 +351,8 @@ async def cmd_set_dates(cdp_base: str, date_str: str) -> None:
     # Use simulated clicks to set the outer date picker (next to department selector).
     # Steps: click picker input -> click target date cell -> done.
     # NOT the dialog's date picker; the dialog syncs automatically from the outer picker.
+    await cmd_close_dialog(cdp_base)
+
     parts = date_str.strip().split("-")
     if len(parts) != 3:
         raise SystemExit("ERROR: --date must be YYYY-MM-DD")

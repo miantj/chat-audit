@@ -25,3 +25,8 @@ export function getScriptsDir() {
   }
   return candidates[0];
 }
+
+/** chat-audit-export 根目录（含 SKILL.md、scripts/） */
+export function getSkillRoot() {
+  return path.dirname(getScriptsDir());
+}

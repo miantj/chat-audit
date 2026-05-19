@@ -52,11 +52,16 @@ function normalizeExportOptions(raw) {
 }
 
 function createWindow() {
+  const isPackaged = app.isPackaged;
+  const preloadPath = isPackaged
+    ? path.join(process.resourcesPath, 'preload.cjs')
+    : path.join(__dirname, 'preload.cjs');
+
   mainWindow = new BrowserWindow({
     width: 900,
     height: 700,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
+      preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false
     },
@@ -131,6 +136,17 @@ ipcMain.handle('start-export', async (_event, rawOptions) => {
   exportRunning = true;
 
   const emitter = new EventEmitter();
+
+  // 错误收集：在 orchestrator 完成前发生的所有错误都通过这个通道传递
+  let startupError = null;
+  emitter.on('error', (data) => {
+    // 只在 startupError 未设置时才记录第一个错误
+    if (!startupError) {
+      startupError =
+        typeof data === 'string' ? data : data?.message || '导出失败';
+    }
+  });
+
   activeOrchestrator = new Orchestrator(options, emitter);
 
   emitter.on('progress', (data) => sendToRenderer('export-progress', data));
@@ -139,22 +155,30 @@ ipcMain.handle('start-export', async (_event, rawOptions) => {
     activeOrchestrator = null;
     sendToRenderer('export-complete', data);
   });
-  emitter.on('error', (data) => {
-    exportRunning = false;
-    activeOrchestrator = null;
-    const message =
-      typeof data === 'string' ? data : data?.message || '导出失败';
-    sendToRenderer('export-error', { message });
-  });
 
+  // 启动 orchestrator，捕获其抛出的异常
   activeOrchestrator
     .start()
+    .then(() => {
+      // 正常完成，complete 事件会负责后续处理
+    })
     .catch((error) => {
       log.error('start-export error:', error);
+      // 如果还没有通过 error 事件发送，就在这里发
+      if (!startupError) {
+        startupError = error.message;
+      }
       exportRunning = false;
       activeOrchestrator = null;
-      sendToRenderer('export-error', { message: error.message });
+      sendToRenderer('export-error', { message: startupError });
     });
+
+  // 如果 start() 同步抛异常（比如 prepareCrmPage 同步检查失败），在这里捕获
+  if (startupError) {
+    exportRunning = false;
+    activeOrchestrator = null;
+    return { success: false, error: startupError };
+  }
 
   return { success: true, started: true };
 });

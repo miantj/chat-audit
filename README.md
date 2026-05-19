@@ -1,29 +1,66 @@
-# 一手聊天审计导出工具（Windows GUI 版）
+# 一手聊天审计导出工具
 
-面向业务人员的 Windows 桌面工具；核心导出逻辑在 `chat-audit-export/`（与 Cursor Skill 共用同一套 Node 脚本）。
+面向业务人员的桌面工具（**Electron**）；核心导出逻辑在 `chat-audit-export/`（与 Cursor Skill 共用同一套 Node/Python 脚本）。
 
 ## 系统要求
 
-- Windows 10/11
-- Google Chrome 或 Microsoft Edge
-- 网络（首次使用可自动下载 Node.js）
+- **macOS** 或 **Windows 10/11**
+- Google Chrome（推荐）或 Chromium
+- **Node.js 22+**（运行导出脚本）
+- **Python 3.10+**（仅 CRM 预检脚本 `crm-preflight.py` 等，需 `pip install -r chat-audit-export/scripts/requirements-preflight.txt`）
+
+## 项目结构
+
+| 目录 | 说明 |
+|------|------|
+| `electron/` | 桌面 GUI（主入口） |
+| `chat-audit-export/` | 导出引擎与 Skill 文档（`SKILL.md`） |
+
+## 使用方法（最终用户）
+
+1. 安装并构建应用（见下方「开发者」），或运行打包后的安装包
+2. 启动应用后会尝试打开**专用 Chrome**（`~/.chrome-chat-audit-profile`）；若见登录页，请在该窗口登录 CRM（验证码需人工输入）
+3. 选择导出日期、部门与输出目录
+4. 点击「开始导出」；失败时会尝试有限次自愈，并依赖 checkpoint 续跑；全部完成后自动生成 `chat-audit-日期.business.csv`
+
+## 开发者
+
+```bash
+# 1. 安装 Electron 依赖
+cd electron && pnpm install
+
+# 2. 安装 Python 预检依赖（首次）
+pip install -r ../chat-audit-export/scripts/requirements-preflight.txt
+
+# 3. 开发运行
+pnpm start
+```
+
+从仓库根目录也可：
+
+```bash
+pnpm --dir electron install
+pnpm --dir electron start
+```
+
+### 打包
+
+```bash
+cd electron
+pnpm run build      # Windows NSIS
+pnpm run build:mac  # macOS DMG
+```
+
+打包产物会将 `chat-audit-export/scripts` 打入 `resources/scripts`。
+
+## 无 GUI：Agent / CLI
+
+无需 Electron，在 `chat-audit-export/scripts/` 下按 `chat-audit-export/SKILL.md` 执行 `crm-preflight.py`、`export-date-range.js`、`export-with-self-heal.sh` 等即可。
 
 ## 依赖说明
 
 | 组件 | 说明 |
 |------|------|
-| Chrome/Edge | 远程调试端口默认 `9222`；应用可一键启动专用配置目录 |
-| Node.js 22+ | 导出与 CRM 预检脚本需要；应用内可自动安装到 `%APPDATA%\chat-audit-export\nodejs` |
-| Python 3 | 仅开发/打包 GUI 时需要；最终用户运行 `chat-audit-export.exe` 可不装 Python |
-
-## 使用方法
-
-1. 双击 `dist/chat-audit-export/chat-audit-export.exe`（或开发态运行 `python run.py`）
-2. 若提示 Chrome 未连接，点击「启动 Chrome」或手动：`chrome.exe --remote-debugging-port=9222`
-3. 在浏览器中登录 CRM（验证码需人工输入）
-4. 选择日期范围、部门与输出目录
-5. 点击「开始导出」；失败时应用会尝试有限次自愈并重试（依赖 checkpoint 续跑）
-
-## 开发者 / Agent 直接使用 Skill
-
-无需 GUI，在 `chat-audit-export/scripts/` 下按 `chat-audit-export/SKILL.md` 执行 `crm-check.js`、`export-date-range.js` 等即可。
+| Chrome | 远程调试默认 `http://127.0.0.1:9222`；应用会启动专用配置目录 |
+| Node.js 22+ | `export-date-range.js` 等 |
+| Python 3 + websockets | `crm-preflight.py`、`refresh-wecom-qr.py` |

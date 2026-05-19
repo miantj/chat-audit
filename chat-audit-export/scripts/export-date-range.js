@@ -38,6 +38,8 @@ function showUsage() {
     '  --paced                 Enable paced export delays for small samples',
     '  --no-paced              Disable paced export delays',
     '  --dry-run-targets       Probe metric categories and print target customer IDs without exporting messages',
+    '  --retry-failed          Re-export only previously failed conversations from existing output',
+    '  --fast                  Aggressive speed mode: minimize delays (used for failed-list retry)',
     '  --help                  Show this message',
     '',
     'Environment variables:',
@@ -133,12 +135,15 @@ let shutdownRequested = false;
 const PAUSE_FILE =
   process.env.CHAT_AUDIT_PAUSE_FILE ||
   path.join(os.tmpdir(), 'chat-audit-export-pause');
+const STOP_FILE =
+  process.env.CHAT_AUDIT_STOP_FILE ||
+  path.join(os.tmpdir(), 'chat-audit-export-stop');
 
 process.on('SIGTERM', () => { shutdownRequested = true; console.error(JSON.stringify({event:'export-signal',signal:'SIGTERM',message:'收到终止信号，完成当前对话后退出…'})); });
 process.on('SIGINT', () => { shutdownRequested = true; console.error(JSON.stringify({event:'export-signal',signal:'SIGINT',message:'收到中断信号，完成当前对话后退出…'})); });
 
 // Export the shutdown flag for use in export-current-page.js
-export { shutdownRequested, PAUSE_FILE };
+export { shutdownRequested, PAUSE_FILE, STOP_FILE };
 
 const maxConversations = Number(opts.max || '2000');
 const maxRows = Number(opts['max-rows'] || '999999');
@@ -146,10 +151,91 @@ const expectedCategory = (opts.category || '').trim();
 const expectedActiveTab = (opts.tab || '').trim();
 const skipDateValidation = opts['skip-date-validation'] === true;
 const dryRunTargets = opts['dry-run-targets'] === true;
+const retryFailed = opts['retry-failed'] === true;
+const fastMode = opts.fast === true;
+
+if (fastMode) {
+  process.env.CUSTOMER_DELAY_MIN_MS = '200';
+  process.env.CUSTOMER_DELAY_MAX_MS = '400';
+  process.env.EMPLOYEE_DELAY_MIN_MS = '300';
+  process.env.EMPLOYEE_DELAY_MAX_MS = '600';
+  process.env.BATCH_REST_MS = '300';
+  process.env.SEARCH_RESULT_DELAY_MIN_MS = '300';
+  process.env.SEARCH_RESULT_DELAY_MAX_MS = '600';
+  process.env.SELECT_FRIEND_DELAY_MIN_MS = '300';
+  process.env.SELECT_FRIEND_DELAY_MAX_MS = '600';
+  process.env.MESSAGE_SCROLL_DELAY_MIN_MS = '500';
+  process.env.MESSAGE_SCROLL_DELAY_MAX_MS = '1000';
+  process.env.STABLE_POLL_MS = '600';
+  process.env.STABLE_ATTEMPTS = '6';
+}
+
 const paced =
   opts['no-paced'] === true
     ? false
     : (opts.paced === true || (!dryRunTargets && !(maxConversations <= 1 && maxRows <= 1)));
+
+let retryFailedConversations = null;
+if (retryFailed) {
+  if (!fs.existsSync(outputPath)) {
+    process.stdout.write(
+      JSON.stringify({
+        event: 'export-progress',
+        message: '[retry-failed] No output file yet; nothing to retry'
+      }) + '\n'
+    );
+    console.log(
+      JSON.stringify({
+        event: 'export-complete',
+        conversations: 0,
+        completed: 0,
+        failed: 0,
+        outputPath,
+        retrySkipped: true
+      })
+    );
+    process.exit(0);
+  }
+  try {
+    const existingDataset = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    const failedIds = existingDataset?.progress?.failed_conversation_ids || [];
+    if (failedIds.length > 0) {
+      retryFailedConversations = failedIds;
+      process.stdout.write(
+        JSON.stringify({
+          event: 'export-progress',
+          message: `[retry-failed] Targeting ${failedIds.length} previously failed conversations`
+        }) + '\n'
+      );
+    } else {
+      process.stdout.write(
+        JSON.stringify({
+          event: 'export-progress',
+          message: '[retry-failed] No failed conversations to retry'
+        }) + '\n'
+      );
+      console.log(
+        JSON.stringify({
+          event: 'export-complete',
+          conversations: existingDataset.conversations?.length ?? 0,
+          completed: existingDataset.progress?.completed_conversation_ids?.length ?? 0,
+          failed: 0,
+          outputPath,
+          retrySkipped: true
+        })
+      );
+      process.exit(0);
+    }
+  } catch (e) {
+    console.error(
+      JSON.stringify({
+        event: 'export-error',
+        message: `Failed to load existing output for retry: ${e.message}`
+      })
+    );
+    process.exit(1);
+  }
+}
 
 console.log(JSON.stringify({
   event: 'export-start',
@@ -178,9 +264,14 @@ try {
     skipDateValidation,
     dryRunTargets,
     paced,
+    retryFailedConversations,
     shutdownRequested: () => shutdownRequested,
     pauseFile: PAUSE_FILE,
-    log: (msg) => console.log(JSON.stringify({ event: 'export-progress', message: msg }))
+    stopFile: STOP_FILE,
+    log: (msg) => {
+      // 管道/tee 时 console.log 可能块缓冲，用 write 保证 UI 实时日志
+      process.stdout.write(JSON.stringify({ event: 'export-progress', message: msg }) + '\n');
+    }
   });
 
   console.log(JSON.stringify({

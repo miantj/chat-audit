@@ -5,6 +5,7 @@ import path from 'node:path';
 import { CDPClient } from './lib/cdp.js';
 import { shouldPersistSnapshot } from './lib/chat-loading.js';
 import {
+  createEmptyCheckpoint,
   getDefaultCheckpointPath,
   isMetricCheckpoint,
   loadCheckpoint,
@@ -13,7 +14,7 @@ import {
   shouldSkipMetricCustomerBeforeCheckpoint,
   shouldSkipRowBeforeCheckpoint
 } from './lib/checkpoint.js';
-import { extractCustomerId } from './lib/customer-id.js';
+import { extractCustomerId, extractCustomerSearchTerms } from './lib/customer-id.js';
 import { normalizeErrorMessage, shouldSkipConversationError, WxworkLoginRequiredError, RateLimitedError } from './lib/export-errors.js';
 import { waitForFriendPageReady } from './lib/friend-page.js';
 import { appendJsonlRecord, readJsonlRecords } from './lib/jsonl-store.js';
@@ -25,23 +26,23 @@ import {
   upsertDatasetConversation
 } from './lib/dataset.js';
 
-const WAIT_MS = 1200;
-const STABLE_POLL_MS = 1200;
-const STABLE_ATTEMPTS = 12;
+let WAIT_MS = 1200;
+let STABLE_POLL_MS = 1200;
+let STABLE_ATTEMPTS = 12;
 const MAX_MESSAGE_SCROLLS = Number(process.env.MAX_MESSAGE_SCROLLS || '80');
 const MESSAGE_SCROLL_IDLE_LIMIT = Number(process.env.MESSAGE_SCROLL_IDLE_LIMIT || '3');
-const CUSTOMER_DELAY_MIN_MS = Number(process.env.CUSTOMER_DELAY_MIN_MS || '1000');
-const CUSTOMER_DELAY_MAX_MS = Number(process.env.CUSTOMER_DELAY_MAX_MS || '3000');
-const EMPLOYEE_DELAY_MIN_MS = Number(process.env.EMPLOYEE_DELAY_MIN_MS || '5000');
-const EMPLOYEE_DELAY_MAX_MS = Number(process.env.EMPLOYEE_DELAY_MAX_MS || '5000');
+let CUSTOMER_DELAY_MIN_MS = Number(process.env.CUSTOMER_DELAY_MIN_MS || '1000');
+let CUSTOMER_DELAY_MAX_MS = Number(process.env.CUSTOMER_DELAY_MAX_MS || '3000');
+let EMPLOYEE_DELAY_MIN_MS = Number(process.env.EMPLOYEE_DELAY_MIN_MS || '5000');
+let EMPLOYEE_DELAY_MAX_MS = Number(process.env.EMPLOYEE_DELAY_MAX_MS || '5000');
 const CUSTOMERS_PER_BATCH = Number(process.env.CUSTOMERS_PER_BATCH || '10');
-const BATCH_REST_MS = Number(process.env.BATCH_REST_MS || '5000');
-const SEARCH_RESULT_DELAY_MIN_MS = Number(process.env.SEARCH_RESULT_DELAY_MIN_MS || '1500');
-const SEARCH_RESULT_DELAY_MAX_MS = Number(process.env.SEARCH_RESULT_DELAY_MAX_MS || '4000');
-const SELECT_FRIEND_DELAY_MIN_MS = Number(process.env.SELECT_FRIEND_DELAY_MIN_MS || '2000');
-const SELECT_FRIEND_DELAY_MAX_MS = Number(process.env.SELECT_FRIEND_DELAY_MAX_MS || '5000');
-const MESSAGE_SCROLL_DELAY_MIN_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MIN_MS || '1500');
-const MESSAGE_SCROLL_DELAY_MAX_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MAX_MS || '4000');
+let BATCH_REST_MS = Number(process.env.BATCH_REST_MS || '5000');
+let SEARCH_RESULT_DELAY_MIN_MS = Number(process.env.SEARCH_RESULT_DELAY_MIN_MS || '1500');
+let SEARCH_RESULT_DELAY_MAX_MS = Number(process.env.SEARCH_RESULT_DELAY_MAX_MS || '4000');
+let SELECT_FRIEND_DELAY_MIN_MS = Number(process.env.SELECT_FRIEND_DELAY_MIN_MS || '2000');
+let SELECT_FRIEND_DELAY_MAX_MS = Number(process.env.SELECT_FRIEND_DELAY_MAX_MS || '5000');
+let MESSAGE_SCROLL_DELAY_MIN_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MIN_MS || '1500');
+let MESSAGE_SCROLL_DELAY_MAX_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MAX_MS || '4000');
 const SAVE_EVERY = 10;
 const EFFECTIVE_METRIC_CATEGORIES = [
   '总有效跟进好友数（人天）',
@@ -56,6 +57,29 @@ async function checkFileExists(filePath) {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function shouldStopExport({ shutdownRequested, stopFile }) {
+  if (shutdownRequested()) {
+    return true;
+  }
+  if (stopFile && (await checkFileExists(stopFile))) {
+    return true;
+  }
+  return false;
+}
+
+async function waitWhilePaused({ pauseFile, stopFile, shutdownRequested, log }) {
+  if (!pauseFile) {
+    return;
+  }
+  while (await checkFileExists(pauseFile)) {
+    if (await shouldStopExport({ shutdownRequested, stopFile })) {
+      return;
+    }
+    log(`[pause] 暂停中（检测到 ${pauseFile}），5秒后重试…`);
+    await sleep(5000);
   }
 }
 
@@ -681,39 +705,18 @@ async function switchToCommunicationExternalFriends(pageClient) {
   const category = await clickDialogCategory(pageClient, '沟通内容');
   await sleep(500);
   const tab = await clickDialogTab(pageClient, '外部好友');
-  await sleep(500);
-  return { ok: category.ok && tab.ok, category, tab };
+  await sleep(800);
+  const searchReady = await waitForFriendSearchInput(pageClient);
+  return { ok: category.ok && tab.ok && searchReady, category, tab, searchReady };
 }
 
-async function searchExternalFriendByCustomerId(pageClient, customerId) {
-  const searchResult = await evalJson(
-    pageClient,
-    `(() => {
-      const dialog = ${visibleDialogExpr};
-      if (!dialog) return { ok: false, reason: 'dialog-missing' };
-      const inputs = Array.from(dialog.querySelectorAll('input'));
-      const input =
-        inputs.find((el) => /搜索好友|好友昵称|备注/.test(el.getAttribute('placeholder') || '')) ||
-        inputs.find((el) => !/年|月|日|date|YYYY/i.test(el.getAttribute('placeholder') || '') && el.type !== 'hidden');
-      if (!input) return { ok: false, reason: 'search-input-missing' };
+function findFriendListMatch(items, customerId) {
+  const id = String(customerId || '');
+  if (!id) return undefined;
+  return items.find((item) => (item.text || '').includes(id));
+}
 
-      input.focus();
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      if (setter) setter.call(input, '');
-      else input.value = '';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      return { ok: true, placeholder: input.getAttribute('placeholder') || '' };
-    })()`
-  );
-  if (!searchResult.ok) {
-    return searchResult;
-  }
-
-  // Use the browser's text insertion path so Vue/Element input listeners see
-  // the same events as real typing or paste.
-  await pageClient.send('Input.insertText', { text: String(customerId) });
-  await sleep(200);
+async function dispatchEnterKey(pageClient) {
   await pageClient.send('Input.dispatchKeyEvent', {
     type: 'keyDown',
     key: 'Enter',
@@ -728,39 +731,164 @@ async function searchExternalFriendByCustomerId(pageClient, customerId) {
     windowsVirtualKeyCode: 13,
     nativeVirtualKeyCode: 13
   });
-  await evalJson(
+}
+
+async function waitForFriendSearchInput(pageClient, maxMs = 8000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxMs) {
+    const state = await evalJson(
+      pageClient,
+      `(() => {
+        const dialog = ${visibleDialogExpr};
+        if (!dialog) return { ok: false, reason: 'dialog-missing' };
+        const inputs = Array.from(dialog.querySelectorAll('input'));
+        const input =
+          inputs.find((el) => /搜索好友|好友昵称|备注/.test(el.getAttribute('placeholder') || '')) ||
+          inputs.find(
+            (el) =>
+              !/年|月|日|date|YYYY/i.test(el.getAttribute('placeholder') || '') &&
+              el.type !== 'hidden'
+          );
+        return { ok: !!input, placeholder: input?.getAttribute('placeholder') || '' };
+      })()`
+    );
+    if (state.ok) return true;
+    await sleep(300);
+  }
+  return false;
+}
+
+async function fillFriendSearchInput(pageClient, query) {
+  const q = String(query);
+  const filled = await evalJson(
     pageClient,
     `(() => {
       const dialog = ${visibleDialogExpr};
-      const input = Array.from(dialog?.querySelectorAll('input') || [])
-        .find((el) => (el.value || '') === ${JSON.stringify(customerId)});
-      const suffix = input?.closest('.el-input')?.querySelector('.el-input__suffix, .el-input__suffix-inner, .el-icon-search');
-      const searchIcon = suffix?.querySelector('.el-icon-search, [class*="search"]') || suffix;
-      if (searchIcon) searchIcon.click();
-      return { value: input?.value || '', clickedSearchIcon: !!searchIcon };
+      if (!dialog) return { ok: false, reason: 'dialog-missing' };
+      const inputs = Array.from(dialog.querySelectorAll('input'));
+      const input =
+        inputs.find((el) => /搜索好友|好友昵称|备注/.test(el.getAttribute('placeholder') || '')) ||
+        inputs.find(
+          (el) =>
+            !/年|月|日|date|YYYY/i.test(el.getAttribute('placeholder') || '') &&
+            el.type !== 'hidden'
+        );
+      if (!input) return { ok: false, reason: 'search-input-missing' };
+
+      input.focus();
+      input.click();
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      const text = ${JSON.stringify(q)};
+      if (setter) setter.call(input, '');
+      else input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      if (setter) setter.call(input, text);
+      else input.value = text;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+
+      return {
+        ok: true,
+        value: input.value || '',
+        placeholder: input.getAttribute('placeholder') || ''
+      };
+    })()`
+  );
+  if (!filled.ok) {
+    return filled;
+  }
+
+  await sleep(200);
+  await dispatchEnterKey(pageClient);
+  await sleep(200);
+
+  const clicked = await evalJson(
+    pageClient,
+    `(() => {
+      const dialog = ${visibleDialogExpr};
+      const inputs = Array.from(dialog?.querySelectorAll('input') || []);
+      const input =
+        inputs.find((el) => (el.value || '') === ${JSON.stringify(q)}) ||
+        inputs.find((el) => /搜索好友|好友昵称|备注/.test(el.getAttribute('placeholder') || ''));
+      const root = input?.closest('.el-input') || input?.parentElement;
+      const suffix = root?.querySelector('.el-input__suffix, .el-input__suffix-inner');
+      const searchIcon =
+        suffix?.querySelector('.el-icon-search, [class*="search"]') ||
+        root?.querySelector('.el-icon-search, [class*="search"]');
+      const appendBtn = input?.closest('.el-input-group')?.querySelector(
+        '.el-input-group__append button, .el-input-group__append .el-button'
+      );
+      const target = searchIcon || appendBtn;
+      if (target) {
+        target.click();
+        return { ok: true, clickedSearchIcon: true };
+      }
+      return { ok: true, clickedSearchIcon: false };
     })()`
   );
 
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < 10000) {
-    const results = await getFriendItems(pageClient);
-    const exact = results.find((item) => item.text.includes(customerId));
-    if (exact) {
-      return { ok: true, items: results, match: exact };
-    }
-    await sleep(500);
-  }
-
-  return { ok: false, reason: 'search-result-missing', items: await getFriendItems(pageClient) };
+  return {
+    ok: true,
+    value: filled.value,
+    placeholder: filled.placeholder,
+    clickedSearchIcon: clicked.clickedSearchIcon
+  };
 }
 
-async function selectSearchedFriend(pageClient, customerId) {
+async function searchExternalFriendByCustomerId(pageClient, customerId, customerInfo = '') {
+  const searchTerms = extractCustomerSearchTerms(customerInfo, customerId);
+  if (searchTerms.length === 0) {
+    return { ok: false, reason: 'search-term-missing' };
+  }
+
+  let lastItems = [];
+  for (const term of searchTerms) {
+    const typed = await fillFriendSearchInput(pageClient, term);
+    if (!typed.ok) {
+      return typed;
+    }
+    await sleep(600);
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 15000) {
+      const results = await getFriendItems(pageClient);
+      lastItems = results;
+      const match = findFriendListMatch(results, customerId);
+      if (match) {
+        return { ok: true, items: results, match, searchTerm: term };
+      }
+      await sleep(500);
+    }
+  }
+
+  return {
+    ok: false,
+    reason: 'search-result-missing',
+    items: lastItems,
+    searchTerms,
+    sampleItems: lastItems.slice(0, 5).map((item) => item.text)
+  };
+}
+
+async function selectSearchedFriend(pageClient, customerId, friendIndex = null) {
+  if (friendIndex != null && Number.isFinite(friendIndex)) {
+    const clicked = await clickFriendItem(pageClient, friendIndex);
+    if (clicked.ok) {
+      await sleep(WAIT_MS);
+    }
+    return clicked;
+  }
+
+  const idJson = JSON.stringify(String(customerId || ''));
   const result = await evalJson(
     pageClient,
     `(() => {
       const dialog = ${visibleDialogExpr};
       const items = Array.from(dialog?.querySelectorAll('.friend-li') || []);
-      const target = items.find((el) => (el.innerText || el.textContent || '').includes(${JSON.stringify(customerId)}));
+      const target = items.find((el) => {
+        const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ');
+        return ${idJson} && text.includes(${idJson});
+      });
       if (!target) return { ok: false, reason: 'friend-missing' };
       target.click();
       return {
@@ -1360,11 +1488,33 @@ export async function exportCurrentPage({
   skipDateValidation = false,
   dryRunTargets = false,
   paced = false,
+  retryFailedConversations = null,
   shutdownRequested = () => false,
   pauseFile = null,
+  stopFile = null,
   log = console.log
 }) {
+  WAIT_MS = Number(process.env.WAIT_MS || '1200');
+  STABLE_POLL_MS = Number(process.env.STABLE_POLL_MS || '1200');
+  STABLE_ATTEMPTS = Number(process.env.STABLE_ATTEMPTS || '12');
+  CUSTOMER_DELAY_MIN_MS = Number(process.env.CUSTOMER_DELAY_MIN_MS || '1000');
+  CUSTOMER_DELAY_MAX_MS = Number(process.env.CUSTOMER_DELAY_MAX_MS || '3000');
+  EMPLOYEE_DELAY_MIN_MS = Number(process.env.EMPLOYEE_DELAY_MIN_MS || '5000');
+  EMPLOYEE_DELAY_MAX_MS = Number(process.env.EMPLOYEE_DELAY_MAX_MS || '5000');
+  BATCH_REST_MS = Number(process.env.BATCH_REST_MS || '5000');
+  SEARCH_RESULT_DELAY_MIN_MS = Number(process.env.SEARCH_RESULT_DELAY_MIN_MS || '1500');
+  SEARCH_RESULT_DELAY_MAX_MS = Number(process.env.SEARCH_RESULT_DELAY_MAX_MS || '4000');
+  SELECT_FRIEND_DELAY_MIN_MS = Number(process.env.SELECT_FRIEND_DELAY_MIN_MS || '2000');
+  SELECT_FRIEND_DELAY_MAX_MS = Number(process.env.SELECT_FRIEND_DELAY_MAX_MS || '5000');
+  MESSAGE_SCROLL_DELAY_MIN_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MIN_MS || '1500');
+  MESSAGE_SCROLL_DELAY_MAX_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MAX_MS || '4000');
+
   const dataset = await loadDataset(outputPath, jsonlPath);
+  const isRetryFailedPass = Array.isArray(retryFailedConversations) && retryFailedConversations.length > 0;
+  if (isRetryFailedPass) {
+    await saveCheckpoint(checkpointPath, createEmptyCheckpoint());
+    log(`[retry-failed] reset checkpoint; will only process ${retryFailedConversations.length} failed conversation(s)`);
+  }
   const loadedCheckpoint = await loadCheckpoint(checkpointPath);
   const checkpoint = isMetricCheckpoint(loadedCheckpoint) ? loadedCheckpoint : { main_page_no: 1, employee_name: null };
   if (loadedCheckpoint.employee_name && !isMetricCheckpoint(loadedCheckpoint)) {
@@ -1389,7 +1539,11 @@ export async function exportCurrentPage({
     let processedRowCount = 0;
 
     for (let mainPageNo = 1; mainPageNo <= mainPager.totalPages; mainPageNo++) {
-      if (dataset.conversations.length >= maxConversations || shutdownRequested() || processedRowCount >= maxRows) {
+      if (
+        dataset.conversations.length >= maxConversations ||
+        (await shouldStopExport({ shutdownRequested, stopFile })) ||
+        processedRowCount >= maxRows
+      ) {
         break;
       }
 
@@ -1415,7 +1569,11 @@ export async function exportCurrentPage({
         : summaries;
 
       for (const row of rows) {
-        if (dataset.conversations.length >= maxConversations || shutdownRequested() || processedRowCount >= maxRows) {
+        if (
+          dataset.conversations.length >= maxConversations ||
+          (await shouldStopExport({ shutdownRequested, stopFile })) ||
+          processedRowCount >= maxRows
+        ) {
           break;
         }
 
@@ -1488,9 +1646,12 @@ export async function exportCurrentPage({
           }
 
           for (const target of targets) {
-            // Check shutdown/pause before each conversation
-            if (shutdownRequested()) {
-              log(`[shutdown] 保存状态并退出…`);
+            if (await shouldStopExport({ shutdownRequested, stopFile })) {
+              log(
+                stopFile && (await checkFileExists(stopFile))
+                  ? `[stop] 收到停止信号，保存状态并退出…`
+                  : `[shutdown] 保存状态并退出…`
+              );
               await saveDataset(outputPath, dataset);
               return {
                 conversations: dataset.conversations.length,
@@ -1501,12 +1662,17 @@ export async function exportCurrentPage({
               };
             }
 
-            // Pause: wait while pause file exists
-            if (pauseFile) {
-              while (await checkFileExists(pauseFile)) {
-                log(`[pause] 暂停中（检测到 ${pauseFile}），5秒后重试…`);
-                await sleep(5000);
-              }
+            await waitWhilePaused({ pauseFile, stopFile, shutdownRequested, log });
+            if (await shouldStopExport({ shutdownRequested, stopFile })) {
+              log(`[stop] 暂停期间收到停止，保存状态并退出…`);
+              await saveDataset(outputPath, dataset);
+              return {
+                conversations: dataset.conversations.length,
+                completed: dataset.progress.completed_conversation_ids.length,
+                failed: dataset.progress.failed_conversation_ids.length,
+                outputPath,
+                shutdown: true
+              };
             }
 
             if (dataset.conversations.length >= maxConversations) {
@@ -1530,6 +1696,9 @@ export async function exportCurrentPage({
             checkpointReached = true;
             const conversationId = `${row.employeeName}__customer_${target.customerId}`;
             if (conversationAlreadyDone(dataset, conversationId)) {
+              continue;
+            }
+            if (isRetryFailedPass && !retryFailedConversations.includes(conversationId)) {
               continue;
             }
 
@@ -1566,7 +1735,11 @@ export async function exportCurrentPage({
               continue;
             }
 
-            const searched = await searchExternalFriendByCustomerId(pageClient, target.customerId);
+            const searched = await searchExternalFriendByCustomerId(
+              pageClient,
+              target.customerId,
+              target.customerInfo
+            );
             await assertNoRateLimitForTarget({
               pageClient,
               outputPath,
@@ -1578,7 +1751,12 @@ export async function exportCurrentPage({
               conversationId
             });
             if (!searched.ok) {
-              log(`[conversation] skipped customer=${target.customerId} error=${searched.reason || 'search-failed'}`);
+              const sampleHint = searched.sampleItems?.length
+                ? ` samples=${JSON.stringify(searched.sampleItems)}`
+                : '';
+              log(
+                `[conversation] skipped customer=${target.customerId} error=${searched.reason || 'search-failed'} terms=${JSON.stringify(searched.searchTerms || [])}${sampleHint}`
+              );
               if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
                 dataset.progress.failed_conversation_ids.push(conversationId);
               }
@@ -1604,7 +1782,11 @@ export async function exportCurrentPage({
               log
             });
 
-            const selected = await selectSearchedFriend(pageClient, target.customerId);
+            const selected = await selectSearchedFriend(
+              pageClient,
+              target.customerId,
+              searched.match?.friendIndex
+            );
             await assertNoRateLimitForTarget({
               pageClient,
               outputPath,

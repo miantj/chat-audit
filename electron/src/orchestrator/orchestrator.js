@@ -39,7 +39,7 @@ export class Orchestrator {
     this.ev.emit('progress', {
       current: 0,
       total: 0,
-      message: '正在准备 CRM 页面（导航、日期、部门）…'
+      message: '正在执行 Skill 预检（Chrome/部门/日期/gate-check/gate-start-export）…'
     });
     await prepareCrmPage({ startDate: start, department });
 
@@ -48,7 +48,8 @@ export class Orchestrator {
     this.ev.emit('progress', {
       current: 0,
       total: 0,
-      message: '正在导出（打开员工行 → 读取指标客户 → 拉取会话）…'
+      message:
+        '正在导出（温和加速 paced：等待约为默认一半；若出现「请求过于频繁」请暂停后重试）…'
     });
 
     const startTime = Date.now();
@@ -63,8 +64,11 @@ export class Orchestrator {
       const elapsed = Math.round((Date.now() - startTime) / 1000);
       this.ev.emit('complete', {
         outputPath: result.outputPath,
+        csvPath: result.csvPath ?? null,
         elapsed,
-        total: result.conversationCount ?? 0
+        total: result.conversationCount ?? 0,
+        failed: result.failed ?? 0,
+        shutdown: result.shutdown ?? false
       });
     } catch (err) {
       throw err;

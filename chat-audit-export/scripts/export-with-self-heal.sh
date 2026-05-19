@@ -29,6 +29,8 @@ else
 fi
 CALLER_CWD="$(pwd)"
 STATE_FILE="/tmp/chat-audit-self-heal-state.json"
+EXPECT_DEPT="${CHAT_AUDIT_EXPECT_DEPT:-大客私域顾问-总}"
+MAX_LOOP=25
 
 # Default export options
 DATE_START=""
@@ -37,6 +39,50 @@ EXPORT_OUT=""
 EXPORT_KEYWORDS=""
 SKIP_DATE_VALIDATION=""
 EXPORT_PACED=""
+RETRY_FAILED=""
+EXPORT_FAST=""
+
+mark_done() {
+  rm -f "$STATE_FILE"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') completed" > "${EXPORT_OUT}.done"
+}
+
+# Generate business CSV after export (same columns as json-to-csv-business.js).
+generate_business_csv() {
+  local csv_out="${EXPORT_OUT%.json}.business.csv"
+  local jsonl_path="${EXPORT_OUT%.json}.jsonl"
+  local input="$EXPORT_OUT"
+
+  if [[ ! -f "$input" ]] && [[ ! -f "$jsonl_path" ]]; then
+    echo "⚠️  Skip CSV: no JSON/JSONL at $EXPORT_OUT"
+    return 0
+  fi
+
+  if [[ ! -f "$input" ]]; then
+    input="$jsonl_path"
+  elif [[ -f "$jsonl_path" ]]; then
+    local json_bytes
+    json_bytes=$(stat -f '%z' "$input" 2>/dev/null || stat -c '%s' "$input" 2>/dev/null || echo 0)
+    # Large dataset JSON: stream from JSONL to avoid loading entire file in Node.
+    if [[ "$json_bytes" -gt 31457280 ]]; then
+      echo "[csv] Large JSON (~$((json_bytes / 1048576))MB), using JSONL for CSV generation"
+      input="$jsonl_path"
+    fi
+  fi
+
+  echo "Generating business CSV..."
+  cd "$SCRIPT_ROOT"
+  set +e
+  node scripts/json-to-csv-business.js --in="$input" --out="$csv_out" 2>&1
+  local csv_code=$?
+  set -e
+  if [[ $csv_code -eq 0 ]] && [[ -f "$csv_out" ]]; then
+    echo "✅ CSV written: $csv_out"
+    CSV_OUT="$csv_out" python3 -c "import json,os; print(json.dumps({'event':'export-csv-complete','csvPath':os.environ['CSV_OUT']}))"
+  else
+    echo "⚠️  CSV generation failed (exit $csv_code); JSON export is still at $EXPORT_OUT"
+  fi
+}
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -69,6 +115,14 @@ while [[ $# -gt 0 ]]; do
       EXPORT_PACED="--no-paced"
       shift
       ;;
+    --retry-failed)
+      RETRY_FAILED="--retry-failed"
+      shift
+      ;;
+    --fast)
+      EXPORT_FAST="--fast"
+      shift
+      ;;
     *)
       echo "Unknown option: $1"
       exit 1
@@ -77,7 +131,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$DATE_START" ]] || [[ -z "$DATE_END" ]]; then
-  echo "Usage: $0 --start=YYYY-MM-DD --end=YYYY-MM-DD [--out=path] [--keywords=...] [--skip-date-validation]"
+  echo "Usage: $0 --start=YYYY-MM-DD --end=YYYY-MM-DD [--out=path] [--keywords=...] [--skip-date-validation] [--retry-failed] [--fast]"
   exit 1
 fi
 
@@ -177,7 +231,7 @@ diagnose_state_json() {
   cd "$SCRIPT_ROOT"
   python3 scripts/crm-preflight.py diagnose-state \
     --cdp "${CHAT_AUDIT_CRM_CDP_BASE%/}" \
-    --expect-dept '大客私域顾问-总' \
+    --expect-dept "$EXPECT_DEPT" \
     --expect-date "$DATE_START" 2>/dev/null || true
 }
 
@@ -229,7 +283,7 @@ self_heal_page_reload() {
   cd "$SCRIPT_ROOT"
   python3 scripts/crm-preflight.py navigate-audit 2>&1 | head -3
   sleep 5
-  python3 scripts/crm-preflight.py set-department --group '大客私域顾问-总' 2>&1 | head -3
+  python3 scripts/crm-preflight.py set-department --group "$EXPECT_DEPT" 2>&1 | head -3
   python3 scripts/crm-preflight.py set-dates --date "$DATE_START" 2>&1 | head -3
 }
 
@@ -304,7 +358,61 @@ EOF
 # ------------------------------------------------------------------
 
 MAX_RETRIES=3
+FAILED_RETRY_MAX=3
+failed_retry_count=0
 attempt=0
+
+failed_count_from_output() {
+  local output="$1"
+  echo "$output" | grep -E '"event":"export-complete"|"event":"export-shutdown"' | tail -1 | python3 -c "
+import json, sys
+line = sys.stdin.read().strip()
+if not line:
+    print(0)
+else:
+    try:
+        d = json.loads(line)
+        print(int(d.get('failed', 0) or 0))
+    except Exception:
+        print(0)
+" 2>/dev/null || echo "0"
+}
+
+count_failed_conversations() {
+  if [[ ! -f "$EXPORT_OUT" ]]; then
+    echo "0"
+    return
+  fi
+  EXPORT_OUT="$EXPORT_OUT" python3 -c "
+import json, os
+d=json.load(open(os.environ['EXPORT_OUT']))
+print(len(d.get('progress',{}).get('failed_conversation_ids',[])))
+" 2>/dev/null || echo "0"
+}
+
+# Returns 0 if another failed-list retry pass was scheduled (caller should continue loop).
+maybe_schedule_failed_retry() {
+  local output="${1:-}"
+  local failed_count
+  if [[ -n "$output" ]]; then
+    failed_count=$(failed_count_from_output "$output")
+  fi
+  if [[ -z "${failed_count:-}" ]] || [[ "${failed_count:-0}" -eq 0 ]]; then
+    failed_count=$(count_failed_conversations)
+  fi
+  if [[ "${failed_count:-0}" -le 0 ]]; then
+    return 1
+  fi
+  if [[ "$failed_retry_count" -ge "$FAILED_RETRY_MAX" ]]; then
+    echo "⚠️  ${failed_count} conversation(s) still failed after ${FAILED_RETRY_MAX} failed-list retry pass(es)."
+    return 1
+  fi
+  failed_retry_count=$((failed_retry_count + 1))
+  echo "⚠️  ${failed_count} conversation(s) failed; scheduling failed-list retry ${failed_retry_count}/${FAILED_RETRY_MAX}..."
+  RETRY_FAILED="--retry-failed"
+  EXPORT_FAST="--fast"
+  return 0
+}
 
 # Attach-first: if debugger is down, cold-start once; never kill a healthy Chrome here.
 if ! chat_audit_cdp_probe; then
@@ -318,45 +426,67 @@ cd "$SCRIPT_ROOT"
 # after a concrete customer is selected inside the dialog.
 if ! python3 scripts/crm-preflight.py gate-start-export \
   --cdp "${CHAT_AUDIT_CRM_CDP_BASE%/}" \
-  --expect-dept '大客私域顾问-总' \
+  --expect-dept "$EXPECT_DEPT" \
   --expect-date "$DATE_START"; then
   exit $?
 fi
 
 while true; do
   attempt=$((attempt + 1))
+  if [[ "$attempt" -gt "$MAX_LOOP" ]]; then
+    echo "ERROR: exceeded max loop iterations ($MAX_LOOP)"
+    exit 1
+  fi
   echo ""
-  echo "========== Export attempt $attempt/$MAX_RETRIES =========="
+  if [[ -n "$RETRY_FAILED" ]]; then
+    echo "========== Retry failed conversations (${failed_retry_count}/${FAILED_RETRY_MAX}, loop $attempt) =========="
+  else
+    echo "========== Export attempt $attempt (self-heal max $MAX_RETRIES per error type) =========="
+  fi
   echo "Date: $DATE_START ~ $DATE_END"
   echo "Output: $EXPORT_OUT"
   echo ""
 
   # Run export — ensure we're in the script root so "scripts/export-date-range.js" resolves
+  # 勿用 output=$(node ...)：会缓冲到 node 结束，Electron/UI 无法实时看到 export-progress
   cd "$SCRIPT_ROOT"
+  tmp_out=$(mktemp "${TMPDIR:-/tmp}/chat-audit-export.XXXXXX")
   set +e
-  output=$(node scripts/export-date-range.js \
+  node scripts/export-date-range.js \
     --start="$DATE_START" \
     --end="$DATE_END" \
     --out="$EXPORT_OUT" \
     ${EXPORT_KEYWORDS+--keywords=$EXPORT_KEYWORDS} \
     $EXPORT_PACED \
-    $SKIP_DATE_VALIDATION 2>&1)
-  exit_code=$?
+    $SKIP_DATE_VALIDATION \
+    $RETRY_FAILED \
+    $EXPORT_FAST 2>&1 | tee "$tmp_out"
+  exit_code=${PIPESTATUS[0]}
   set -e
+  output=$(cat "$tmp_out")
+  rm -f "$tmp_out"
 
   if [[ $exit_code -eq 0 ]]; then
-    echo "$output"
     echo ""
     echo "✅ Export completed successfully!"
     clear_state
+    if maybe_schedule_failed_retry "$output"; then
+      continue
+    fi
+    generate_business_csv
+    mark_done
     exit 0
   fi
 
-  # Extract error message (only from export-error lines, skip export-progress)
-  error_msg=$(echo "$output" | grep '"event":"export-error"' | head -1 | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('message',''))" 2>/dev/null || echo "$output" | tail -3)
+  # Extract error message — ONLY from export-error JSON lines.
+  error_msg=$(echo "$output" | grep '"event":"export-error"' | head -1 | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('message',''))" 2>/dev/null)
 
   if [[ -z "$error_msg" ]]; then
-    error_msg="$output"
+    echo ""
+    echo "⚠️  Export exited with code $exit_code but no export-error event."
+    echo "    Checkpoint / JSONL preserved — click Start again to resume from checkpoint."
+    clear_state
+    exit 1
   fi
 
   echo "Export failed: $error_msg"

@@ -1,106 +1,229 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
-import { getScriptsDir } from './paths.js';
+import { getScriptsDir, getSkillRoot } from './paths.js';
 import { PAUSE_FILE, STOP_FILE } from './signal-files.js';
+import { DEFAULT_CDP } from './cdp-probe.js';
 
-const NODE_CMD = process.platform === 'win32' ? 'node.exe' : 'node';
+const LARGE_JSON_BYTES = 40 * 1024 * 1024;
+
+function countExportedConversations(outputPath) {
+  const jsonlPath = outputPath.replace(/\.json$/i, '.jsonl');
+  if (fs.existsSync(jsonlPath)) {
+    const text = fs.readFileSync(jsonlPath, 'utf8');
+    const n = text.split('\n').filter((line) => line.trim()).length;
+    if (n > 0) {
+      return n;
+    }
+  }
+  if (!fs.existsSync(outputPath)) {
+    return 0;
+  }
+  const stat = fs.statSync(outputPath);
+  if (stat.size > LARGE_JSON_BYTES) {
+    throw new Error(
+      '导出 JSON 过大且 JSONL 为空，无法轻量统计会话数。请确认同目录 .jsonl 是否正常写入。'
+    );
+  }
+  const data = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+  return data?.conversations?.length ?? 0;
+}
+
+function parseExportSummaryFromLogs(logText) {
+  const lines = logText.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line.startsWith('{')) {
+      continue;
+    }
+    try {
+      const ev = JSON.parse(line);
+      if (ev.event !== 'export-complete' && ev.event !== 'export-shutdown') {
+        continue;
+      }
+      return {
+        conversationCount: Number(ev.conversations ?? 0),
+        failed: Number(ev.failed ?? 0),
+        shutdown: ev.event === 'export-shutdown' || Boolean(ev.shutdown)
+      };
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
+/** 温和加速：仍启用 paced，但将各段等待约为 Skill 默认的一半（降低限流风险） */
+export const MODERATE_PACED_ENV = {
+  CUSTOMER_DELAY_MIN_MS: '400',
+  CUSTOMER_DELAY_MAX_MS: '800',
+  SEARCH_RESULT_DELAY_MIN_MS: '500',
+  SEARCH_RESULT_DELAY_MAX_MS: '1000',
+  SELECT_FRIEND_DELAY_MIN_MS: '800',
+  SELECT_FRIEND_DELAY_MAX_MS: '1500',
+  MESSAGE_SCROLL_DELAY_MIN_MS: '600',
+  MESSAGE_SCROLL_DELAY_MAX_MS: '1200',
+  BATCH_REST_MS: '2000',
+  EMPLOYEE_DELAY_MIN_MS: '1000',
+  EMPLOYEE_DELAY_MAX_MS: '2000'
+};
 
 /**
- * 调用成熟的 export-date-range.js（内部走 export-current-page：点员工行 → 弹窗 → 指标客户列表 → 导出）。
+ * 与 SKILL.md Step 4 一致：export-with-self-heal.sh（CDP、gate-start、重试自愈、export-date-range）。
  */
 export function runExportEngine(options, eventEmitter) {
   const start = options.start ?? options.startDate;
   const end = options.end ?? options.endDate;
-  const department = options.department || '';
   const outputDir = options.outputDir;
 
   const scriptsDir = getScriptsDir();
-  const scriptPath = path.join(scriptsDir, 'export-date-range.js');
+  const skillRoot = getSkillRoot();
+  const shellScript = path.join(scriptsDir, 'export-with-self-heal.sh');
   const outputPath = path.join(outputDir, `chat-audit-${start}.json`);
+  const expectDept = options.department || '大客私域顾问-总';
 
-  const args = [
-    scriptPath,
+  const shellArgs = [
+    shellScript,
     `--start=${start}`,
     `--end=${end}`,
     `--out=${outputPath}`,
-    // 不传时 export-date-range 默认只导出「小米,丽丽,农农,可可」四人
-    '--keywords='
+    '--keywords=',
+    '--skip-date-validation'
   ];
-  // 主表部门已在 prepareCrmPage(set-department) 设好；--category 是弹窗内「沟通内容」等，勿传部门名
 
-  const proc = spawn(NODE_CMD, args, {
-    cwd: outputDir,
+  // 行缓冲 bash，避免 "========== Export attempt" 等 echo 攒批才到 UI
+  const proc = spawn('stdbuf', ['-oL', '-eL', 'bash', ...shellArgs], {
+    cwd: skillRoot,
     env: {
       ...process.env,
+      ...MODERATE_PACED_ENV,
+      CHAT_AUDIT_CRM_CDP_BASE: DEFAULT_CDP,
       CHAT_AUDIT_PAUSE_FILE: PAUSE_FILE,
-      CHAT_AUDIT_STOP_FILE: STOP_FILE
+      CHAT_AUDIT_STOP_FILE: STOP_FILE,
+      CHAT_AUDIT_EXPECT_DEPT: expectDept
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
 
   let stdoutBuf = '';
   let stderrBuf = '';
+  let lineBuf = '';
 
   const handleLine = (line) => {
     const trimmed = line.trim();
-    if (!trimmed.startsWith('{')) return;
-    try {
-      const evt = JSON.parse(trimmed);
-      if (evt.event === 'export-progress' && evt.message) {
-        eventEmitter.emit('progress', {
-          current: 0,
-          total: -1,
-          message: evt.message
-        });
+    if (!trimmed) return;
+
+    if (trimmed.startsWith('{')) {
+      try {
+        const evt = JSON.parse(trimmed);
+        if (evt.event === 'export-progress' && evt.message) {
+          eventEmitter.emit('progress', {
+            current: 0,
+            total: -1,
+            message: evt.message
+          });
+          return;
+        }
+        if (evt.event === 'export-error' && evt.message) {
+          eventEmitter.emit('progress', {
+            current: 0,
+            total: -1,
+            message: `错误: ${evt.message}`
+          });
+        }
+        if (evt.event === 'export-csv-complete' && evt.csvPath) {
+          csvPath = evt.csvPath;
+          eventEmitter.emit('progress', {
+            current: 0,
+            total: -1,
+            message: `CSV 已生成: ${evt.csvPath}`
+          });
+        }
+      } catch {
+        /* 非 JSON */
       }
-    } catch {
-      /* 非 JSON 行忽略 */
+    }
+
+    if (
+      trimmed.includes('[retry-failed]') ||
+      trimmed.includes('retrying failed list')
+    ) {
+      eventEmitter.emit('progress', {
+        current: 0,
+        total: -1,
+        message: trimmed
+      });
+    }
+
+    if (
+      trimmed.startsWith('[') ||
+      trimmed.startsWith('✅') ||
+      trimmed.startsWith('⚠️') ||
+      trimmed.startsWith('===') ||
+      trimmed.startsWith('Export ') ||
+      trimmed.startsWith('[self-heal]') ||
+      trimmed.startsWith('Diagnosed ')
+    ) {
+      eventEmitter.emit('progress', {
+        current: 0,
+        total: -1,
+        message: trimmed
+      });
     }
   };
 
-  proc.stdout.on('data', (chunk) => {
-    stdoutBuf += chunk.toString();
-    const lines = stdoutBuf.split('\n');
-    stdoutBuf = lines.pop() || '';
-    lines.forEach(handleLine);
-  });
+  const feedChunk = (chunk, isStdout) => {
+    const text = chunk.toString();
+    if (isStdout) stdoutBuf += text;
+    else stderrBuf += text;
+    lineBuf += text;
+    const parts = lineBuf.split('\n');
+    lineBuf = parts.pop() || '';
+    parts.forEach(handleLine);
+  };
 
-  proc.stderr.on('data', (chunk) => {
-    stderrBuf += chunk.toString();
-  });
+  proc.stdout.on('data', (chunk) => feedChunk(chunk, true));
+  proc.stderr.on('data', (chunk) => feedChunk(chunk, false));
+
+  let csvPath = null;
 
   const done = new Promise((resolve, reject) => {
     proc.on('error', (err) => {
-      reject(new Error(`无法启动 Node 导出脚本: ${err.message}`));
+      reject(
+        new Error(
+          `无法启动导出脚本（需 bash 与 chat-audit-export/scripts/export-with-self-heal.sh）：${err.message}`
+        )
+      );
     });
     proc.on('close', (code) => {
-      if (stdoutBuf.trim()) handleLine(stdoutBuf);
+      if (lineBuf.trim()) handleLine(lineBuf.trim());
+
       if (code === 0) {
-        let conversationCount = 0;
+        const summary = parseExportSummaryFromLogs(stdoutBuf);
+        let conversationCount = summary?.conversationCount ?? 0;
+        let failed = summary?.failed ?? 0;
+        const shutdown = summary?.shutdown ?? false;
         try {
-          const raw = fs.readFileSync(outputPath, 'utf8');
-          const data = JSON.parse(raw);
-          conversationCount = data?.conversations?.length ?? 0;
-        } catch {
-          /* ignore */
+          if (!conversationCount) {
+            conversationCount = countExportedConversations(outputPath);
+          }
+        } catch (err) {
+          reject(err);
+          return;
         }
-        if (conversationCount === 0) {
+        if (conversationCount === 0 && !shutdown) {
           reject(
             new Error(
-              '导出已结束但未产生任何会话记录。请确认：1) 主表有员工行；2) 日期/部门筛选正确；3) 未使用错误的员工关键词过滤。'
+              '导出已结束但未产生任何会话记录。请确认主表有员工行、日期/部门正确，且专用 Chrome 已登录 CRM。'
             )
           );
           return;
         }
-        resolve({ outputPath, code, conversationCount });
+        resolve({ outputPath, csvPath, code, conversationCount, failed, shutdown });
       } else {
         reject(
           new Error(
-            `导出进程退出 code=${code}\n${stderrBuf.trim() || stdoutBuf.trim()}`.slice(
-              0,
-              800
-            )
+            `导出失败 (exit ${code})\n${(stderrBuf || stdoutBuf).trim()}`.slice(0, 1200)
           )
         );
       }

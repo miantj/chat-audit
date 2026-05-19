@@ -138,6 +138,11 @@ export function upsertDatasetConversation(dataset, conversation) {
     dataset.progress.completed_conversation_ids.push(conversation.conversation_id);
   }
 
+  const failedIdx = dataset.progress.failed_conversation_ids.indexOf(conversation.conversation_id);
+  if (failedIdx >= 0) {
+    dataset.progress.failed_conversation_ids.splice(failedIdx, 1);
+  }
+
   dataset.dataset_meta.exported_at = new Date().toISOString();
 }
 

@@ -43,7 +43,7 @@ metadata:
 |--------|------|
 | `scripts/crm-preflight.py` | CDP: login, dates, department, **diagnose-state**, **gate-start-export**, **gate-check**, **gate-wecom** (subcommands) |
 | `scripts/cdp-probe.sh` | CDP URL probe + cold-start Chrome (no pkill); sourced by `export-with-self-heal.sh` |
-| `scripts/export-date-range.js` | Bulk export for `--start` / `--end` |
+| `scripts/export-date-range.js` | Bulk export for `--start` / `--end` (`--retry-failed`, `--fast`) |
 | `scripts/reconcile.js` | JSONL → deduped dataset JSON |
 | `scripts/json-to-csv-business.js` | Business CSV + `transcript` column |
 
@@ -64,7 +64,7 @@ Progress:
 - [ ] Gate Start: `gate-start-export` exit 0 (or use `export-with-self-heal.sh`, which runs it for you)
 - [ ] Step 4: `export-with-self-heal.sh` (self-iteration enabled) or plain `export-date-range.js`
 - [ ] Step 5 (optional): `reconcile.js`
-- [ ] Step 5b (optional): `json-to-csv-business.js`
+- [ ] Step 5b: Business CSV — **auto-generated** by `export-with-self-heal.sh` as `{basename}.business.csv` (or run `json-to-csv-business.js` manually)
 - [ ] Step 6: Generate report ([references/report-template.md](references/report-template.md))
 - [ ] Step 7: Leave the debug Chrome open for the next export. Do **not** close, quit, Ctrl-C, or otherwise stop the browser after a successful run; only close script/CDP websocket connections.
 
@@ -178,6 +178,8 @@ The wrapper script:
 6. Retries up to 3 times for the same error type
 7. Writes lesson notes to `docs/solutions/integration-issues/chat-audit-self-iter-YYYY-MM-DD.md` after 3 failures
 8. For `WXWORK_LOGIN_EXPIRED` (selected customer shows WeCom login), stops immediately without CDP “restart” self-heal.
+9. After a successful pass, if `failed_conversation_ids` is non-empty, automatically runs up to **3** more passes with `--retry-failed --fast` (Electron uses the same wrapper). No infinite loop: stops after 3 failed-list retries even if some IDs remain failed.
+10. After all passes finish (including failed retries), runs `json-to-csv-business.js` → `chat-audit-YYYY-MM-DD.business.csv` next to the JSON (uses JSONL when JSON > ~30MB).
 
 **Handling enterprise WeChat login expiry (WXWORK_LOGIN_EXPIRED):**
 - **Never navigate to `work.weixin.qq.com`, `wxwork.com`, or any standalone WeCom login page.**

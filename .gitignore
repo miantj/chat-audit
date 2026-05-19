@@ -17,9 +17,10 @@ dist-info/
 htmlcov/
 *.egg
 
-# PyInstaller
+# 构建产物
 build/
 dist/
+electron/dist/
 
 # Node（若日后在 scripts 下 npm install）
 node_modules/
