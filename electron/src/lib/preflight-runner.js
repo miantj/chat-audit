@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { getScriptsDir } from './paths.js';
 import { DEFAULT_CDP } from './cdp-probe.js';
+import { getBundledPreflightBin } from './runtime-paths.js';
 
 const PYTHON_CMD = process.platform === 'win32' ? 'python' : 'python3';
 
@@ -9,11 +10,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export function runPreflight(args, { cdpBase = DEFAULT_CDP } = {}) {
   const scriptsDir = getScriptsDir();
-  const scriptPath = path.join(scriptsDir, 'crm-preflight.py');
-  const fullArgs = [scriptPath, ...args, '--cdp', cdpBase];
+  const preflightBin = getBundledPreflightBin();
+  const cmd = preflightBin || PYTHON_CMD;
+  const fullArgs = preflightBin
+    ? [...args, '--cdp', cdpBase]
+    : [path.join(scriptsDir, 'crm-preflight.py'), ...args, '--cdp', cdpBase];
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(PYTHON_CMD, fullArgs, {
+    const proc = spawn(cmd, fullArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: scriptsDir
     });
@@ -28,7 +32,7 @@ export function runPreflight(args, { cdpBase = DEFAULT_CDP } = {}) {
     });
 
     proc.on('error', (err) => {
-      reject(new Error(`无法启动 Python（${PYTHON_CMD}）：${err.message}`));
+      reject(new Error(`无法启动预检（${cmd}）：${err.message}`));
     });
 
     proc.on('close', (code) => {

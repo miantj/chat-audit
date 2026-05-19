@@ -19,6 +19,16 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_ROOT="$(dirname "$SCRIPT_DIR")"
+NODE_BIN="${CHAT_AUDIT_NODE_BIN:-node}"
+PYTHON_BIN="${CHAT_AUDIT_PYTHON_BIN:-python3}"
+
+run_preflight() {
+  if [[ -n "${CHAT_AUDIT_PREFLIGHT_BIN:-}" ]]; then
+    "$CHAT_AUDIT_PREFLIGHT_BIN" "$@"
+  else
+    "$PYTHON_BIN" "$SCRIPT_DIR/crm-preflight.py" "$@"
+  fi
+}
 # Shared CDP probe + cold-start (CHAT_AUDIT_CRM_CDP_BASE, default http://localhost:9222).
 # shellcheck source=cdp-probe.sh
 source "$SCRIPT_DIR/cdp-probe.sh"
@@ -73,12 +83,12 @@ generate_business_csv() {
   echo "Generating business CSV..."
   cd "$SCRIPT_ROOT"
   set +e
-  node scripts/json-to-csv-business.js --in="$input" --out="$csv_out" 2>&1
+  "$NODE_BIN" scripts/json-to-csv-business.js --in="$input" --out="$csv_out" 2>&1
   local csv_code=$?
   set -e
   if [[ $csv_code -eq 0 ]] && [[ -f "$csv_out" ]]; then
     echo "✅ CSV written: $csv_out"
-    CSV_OUT="$csv_out" python3 -c "import json,os; print(json.dumps({'event':'export-csv-complete','csvPath':os.environ['CSV_OUT']}))"
+    CSV_OUT="$csv_out" "$NODE_BIN" -e "console.log(JSON.stringify({event:'export-csv-complete',csvPath:process.env.CSV_OUT}))"
   else
     echo "⚠️  CSV generation failed (exit $csv_code); JSON export is still at $EXPORT_OUT"
   fi
@@ -172,11 +182,12 @@ clear_state() {
 get_retry_count() {
   local error_id="$1"
   if [[ -f "$STATE_FILE" ]]; then
-    python3 -c "
-import json
-state = json.load(open('$STATE_FILE'))
-counts = state.get('error_counts', {})
-print(counts.get('$error_id', 0))
+    STATE_FILE="$STATE_FILE" ERROR_ID="$error_id" "$NODE_BIN" -e "
+const fs=require('fs');
+try {
+  const s=JSON.parse(fs.readFileSync(process.env.STATE_FILE,'utf8'));
+  console.log(Number(s.error_counts?.[process.env.ERROR_ID])||0);
+} catch { console.log(0); }
 " 2>/dev/null || echo "0"
   else
     echo "0"
@@ -185,21 +196,19 @@ print(counts.get('$error_id', 0))
 
 increment_retry() {
   local error_id="$1"
-  python3 -c "
-import json, os
-state_file = '$STATE_FILE'
-state = {}
-if os.path.exists(state_file):
-    state = json.load(open(state_file))
-error_counts = state.get('error_counts', {})
-last_error = state.get('last_error_type', '')
-if last_error != '$error_id':
-    error_counts = {}
-    last_error = '$error_id'
-error_counts['$error_id'] = error_counts.get('$error_id', 0) + 1
-state = {'error_counts': error_counts, 'last_error_type': last_error}
-json.dump(state, open(state_file, 'w'))
-print(error_counts['$error_id'])
+  STATE_FILE="$STATE_FILE" ERROR_ID="$error_id" "$NODE_BIN" -e "
+const fs=require('fs');
+const sf=process.env.STATE_FILE;
+const eid=process.env.ERROR_ID;
+let state={};
+try { if (fs.existsSync(sf)) state=JSON.parse(fs.readFileSync(sf,'utf8')); } catch {}
+let error_counts=state.error_counts||{};
+let last_error=state.last_error_type||'';
+if (last_error!==eid) { error_counts={}; last_error=eid; }
+error_counts[eid]=(Number(error_counts[eid])||0)+1;
+state={error_counts,last_error_type:last_error};
+fs.writeFileSync(sf,JSON.stringify(state));
+console.log(error_counts[eid]);
 " 2>/dev/null
 }
 
@@ -229,14 +238,14 @@ detect_error_type() {
 
 diagnose_state_json() {
   cd "$SCRIPT_ROOT"
-  python3 scripts/crm-preflight.py diagnose-state \
+  run_preflight diagnose-state \
     --cdp "${CHAT_AUDIT_CRM_CDP_BASE%/}" \
     --expect-dept "$EXPECT_DEPT" \
     --expect-date "$DATE_START" 2>/dev/null || true
 }
 
 diagnose_state_name() {
-  diagnose_state_json | python3 -c "import json,sys; data=sys.stdin.read().strip(); print(json.loads(data).get('state','UNKNOWN_BLOCKED') if data else 'UNKNOWN_BLOCKED')" 2>/dev/null || echo "UNKNOWN_BLOCKED"
+  diagnose_state_json | "$NODE_BIN" -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{try{const d=JSON.parse(s.trim());console.log(d.state||'UNKNOWN_BLOCKED')}catch{console.log('UNKNOWN_BLOCKED')}})" 2>/dev/null || echo "UNKNOWN_BLOCKED"
 }
 
 self_heal_cdp() {
@@ -244,7 +253,7 @@ self_heal_cdp() {
   if chat_audit_cdp_probe; then
     echo "[self-heal] CDP endpoint up — reopening audit page (no Chrome restart)."
     cd "$SCRIPT_ROOT"
-    python3 scripts/crm-preflight.py navigate-audit --cdp "${CHAT_AUDIT_CRM_CDP_BASE%/}" || return 1
+    run_preflight navigate-audit --cdp "${CHAT_AUDIT_CRM_CDP_BASE%/}" || return 1
     sleep 3
     return 0
   fi
@@ -281,10 +290,10 @@ asyncio.run(main())
 self_heal_page_reload() {
   echo "[self-heal] Reloading CRM page and re-applying filters..."
   cd "$SCRIPT_ROOT"
-  python3 scripts/crm-preflight.py navigate-audit 2>&1 | head -3
+  run_preflight navigate-audit 2>&1 | head -3
   sleep 5
-  python3 scripts/crm-preflight.py set-department --group "$EXPECT_DEPT" 2>&1 | head -3
-  python3 scripts/crm-preflight.py set-dates --date "$DATE_START" 2>&1 | head -3
+  run_preflight set-department --group "$EXPECT_DEPT" 2>&1 | head -3
+  run_preflight set-dates --date "$DATE_START" 2>&1 | head -3
 }
 
 summarize_and_exit() {
@@ -367,27 +376,22 @@ read_failed_retry_passes() {
     echo 0
     return
   fi
-  FAILED_RETRY_META="$FAILED_RETRY_META" python3 -c "
-import json, os
-p = os.environ['FAILED_RETRY_META']
-try:
-    print(int(json.load(open(p)).get('passes_used', 0) or 0))
-except Exception:
-    print(0)
+  FAILED_RETRY_META="$FAILED_RETRY_META" "$NODE_BIN" -e "
+const fs=require('fs');
+try {
+  const d=JSON.parse(fs.readFileSync(process.env.FAILED_RETRY_META,'utf8'));
+  console.log(Number(d.passes_used)||0);
+} catch { console.log(0); }
 " 2>/dev/null || echo "0"
 }
 
 write_failed_retry_passes() {
   local n="$1"
-  FAILED_RETRY_META="$FAILED_RETRY_META" PASSES_USED="$n" python3 -c "
-import json, os
-from datetime import datetime, timezone
-p = os.environ['FAILED_RETRY_META']
-n = int(os.environ['PASSES_USED'])
-json.dump(
-    {'passes_used': n, 'updated_at': datetime.now(timezone.utc).isoformat()},
-    open(p, 'w'),
-)
+  FAILED_RETRY_META="$FAILED_RETRY_META" PASSES_USED="$n" "$NODE_BIN" -e "
+const fs=require('fs');
+const p=process.env.FAILED_RETRY_META;
+const n=Number(process.env.PASSES_USED)||0;
+fs.writeFileSync(p,JSON.stringify({passes_used:n,updated_at:new Date().toISOString()}));
 " 2>/dev/null || true
 }
 
@@ -403,18 +407,7 @@ failed_retry_count=$(read_failed_retry_passes)
 
 failed_count_from_output() {
   local output="$1"
-  echo "$output" | grep -E '"event":"export-complete"|"event":"export-shutdown"' | tail -1 | python3 -c "
-import json, sys
-line = sys.stdin.read().strip()
-if not line:
-    print(0)
-else:
-    try:
-        d = json.loads(line)
-        print(int(d.get('failed', 0) or 0))
-    except Exception:
-        print(0)
-" 2>/dev/null || echo "0"
+  echo "$output" | grep -E '"event":"export-complete"|"event":"export-shutdown"' | tail -1 | "$NODE_BIN" -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{try{console.log(Number(JSON.parse(s.trim()).failed)||0)}catch{console.log(0)}})" 2>/dev/null || echo "0"
 }
 
 count_failed_conversations() {
@@ -422,10 +415,10 @@ count_failed_conversations() {
     echo "0"
     return
   fi
-  EXPORT_OUT="$EXPORT_OUT" python3 -c "
-import json, os
-d=json.load(open(os.environ['EXPORT_OUT']))
-print(len(d.get('progress',{}).get('failed_conversation_ids',[])))
+  EXPORT_OUT="$EXPORT_OUT" "$NODE_BIN" -e "
+const fs=require('fs');
+const d=JSON.parse(fs.readFileSync(process.env.EXPORT_OUT,'utf8'));
+console.log((d.progress?.failed_conversation_ids||[]).length);
 " 2>/dev/null || echo "0"
 }
 
@@ -464,7 +457,7 @@ fi
 cd "$SCRIPT_ROOT"
 # Export starts from the employee list. WeCom message iframe is only required
 # after a concrete customer is selected inside the dialog.
-if ! python3 scripts/crm-preflight.py gate-start-export \
+if ! run_preflight gate-start-export \
   --cdp "${CHAT_AUDIT_CRM_CDP_BASE%/}" \
   --expect-dept "$EXPECT_DEPT" \
   --expect-date "$DATE_START"; then
@@ -501,7 +494,7 @@ while true; do
   if [[ -n "$RETRY_FAILED" ]]; then
     retry_env=(CHAT_AUDIT_RETRY_FAILED=1)
   fi
-  env "${retry_env[@]}" node scripts/export-date-range.js \
+  env "${retry_env[@]}" "$NODE_BIN" scripts/export-date-range.js \
     --start="$DATE_START" \
     --end="$DATE_END" \
     --out="$EXPORT_OUT" \
@@ -532,7 +525,7 @@ while true; do
   fi
 
   # Extract error message — ONLY from export-error JSON lines.
-  error_msg=$(echo "$output" | grep '"event":"export-error"' | head -1 | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('message',''))" 2>/dev/null)
+  error_msg=$(echo "$output" | grep '"event":"export-error"' | head -1 | "$NODE_BIN" -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{try{console.log(JSON.parse(s.trim()).message||'')}catch{}})" 2>/dev/null)
 
   if [[ -z "$error_msg" ]]; then
     echo ""

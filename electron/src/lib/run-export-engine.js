@@ -8,6 +8,11 @@ import {
   FAILED_RETRY_MAX,
   readFailedRetryPassesUsed
 } from './failed-retry-meta.js';
+import {
+  findBashForExport,
+  getBundledNodeBin,
+  runtimeExportEnv
+} from './runtime-paths.js';
 
 const LARGE_JSON_BYTES = 40 * 1024 * 1024;
 
@@ -19,10 +24,10 @@ export function countFailedConversations(outputPath) {
   if (stat.size > LARGE_JSON_BYTES) {
     try {
       const n = execFileSync(
-        'python3',
+        getBundledNodeBin(),
         [
-          '-c',
-          "import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get('progress',{}).get('failed_conversation_ids',[])))",
+          '-e',
+          "const fs=require('fs');const d=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log((d.progress?.failed_conversation_ids||[]).length);",
           path.resolve(outputPath)
         ],
         { encoding: 'utf8' }
@@ -170,19 +175,42 @@ export function runExportEngine(options, eventEmitter) {
     });
   }
 
-  // 行缓冲 bash，避免 "========== Export attempt" 等 echo 攒批才到 UI
-  const proc = spawn('stdbuf', ['-oL', '-eL', 'bash', ...shellArgs], {
-    cwd: skillRoot,
-    env: {
-      ...process.env,
-      ...MODERATE_PACED_ENV,
-      CHAT_AUDIT_CRM_CDP_BASE: DEFAULT_CDP,
-      CHAT_AUDIT_PAUSE_FILE: PAUSE_FILE,
-      CHAT_AUDIT_STOP_FILE: STOP_FILE,
-      CHAT_AUDIT_EXPECT_DEPT: expectDept
-    },
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
+  const bash = findBashForExport();
+  if (!bash) {
+    throw new Error(
+      '未找到 bash（Windows 请安装 Git for Windows，或设置 CHAT_AUDIT_BASH_BIN）'
+    );
+  }
+  const exportEnv = {
+    ...process.env,
+    ...MODERATE_PACED_ENV,
+    ...runtimeExportEnv(),
+    CHAT_AUDIT_CRM_CDP_BASE: DEFAULT_CDP,
+    CHAT_AUDIT_PAUSE_FILE: PAUSE_FILE,
+    CHAT_AUDIT_STOP_FILE: STOP_FILE,
+    CHAT_AUDIT_EXPECT_DEPT: expectDept
+  };
+  const useStdbuf =
+    process.platform !== 'win32' &&
+    (() => {
+      try {
+        execFileSync('which', ['stdbuf'], { stdio: 'pipe' });
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+  const proc = useStdbuf
+    ? spawn('stdbuf', ['-oL', '-eL', bash, ...shellArgs], {
+        cwd: skillRoot,
+        env: exportEnv,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+    : spawn(bash, shellArgs, {
+        cwd: skillRoot,
+        env: exportEnv,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
 
   let stdoutBuf = '';
   let stderrBuf = '';

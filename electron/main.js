@@ -15,6 +15,7 @@ import {
   ensureAuditChrome,
   DEFAULT_CDP
 } from './src/lib/cdp-probe.js';
+import { verifyBundledRuntime } from './src/lib/runtime-paths.js';
 
 const { app, BrowserWindow, ipcMain, dialog } = electron;
 
@@ -99,6 +100,14 @@ app.whenReady().then(() => {
   clearExportSignals();
   createWindow();
   mainWindow.webContents.once('did-finish-load', () => {
+    const runtime = verifyBundledRuntime();
+    if (!runtime.ok && !runtime.dev) {
+      sendToRenderer('chrome-status', {
+        ready: false,
+        message: `运行环境未就绪：${runtime.issues.join('；')}`
+      });
+      log.error('bundled runtime missing:', runtime.issues);
+    }
     initChromeInBackground();
   });
 

@@ -4,6 +4,7 @@
   "description": "一手聊天审计导出工具",
   "scripts": {
     "start": "pnpm --dir electron start",
+    "prepare-runtime": "pnpm --dir electron prepare-runtime",
     "build": "pnpm --dir electron build",
     "build:mac": "pnpm --dir electron build:mac",
     "build:dir": "pnpm --dir electron build:dir"

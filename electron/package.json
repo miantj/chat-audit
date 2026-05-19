@@ -8,8 +8,13 @@
     "prestart": "node scripts/ensure-deps.cjs",
     "start": "electron .",
     "rebuild:electron": "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ pnpm rebuild electron",
+    "prepare-runtime": "node scripts/prepare-runtime.cjs",
+    "prebuild": "node scripts/prepare-runtime.cjs",
+    "prebuild:mac": "node scripts/prepare-runtime.cjs",
     "build": "electron-builder --win --x64",
-    "build:mac": "electron-builder --mac --x64",
+    "build:mac": "electron-builder --mac",
+    "build:mac:arm64": "electron-builder --mac --arm64",
+    "build:mac:x64": "electron-builder --mac --x64",
     "build:dir": "electron-builder --win --x64 --dir"
   },
   "build": {
@@ -20,17 +25,25 @@
         "from": "../chat-audit-export/scripts",
         "to": "scripts",
         "filter": ["**/*"]
+      },
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": ["**/*"]
       }
     ],
     "mac": {
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": ["arm64", "x64"]
         }
       ],
       "category": "public.app-category.business",
-      "icon": "build/icon.icns"
+      "icon": "build/icon.icns",
+      "identity": null,
+      "gatekeeperAssess": false,
+      "hardenedRuntime": false
     },
     "win": {
       "target": [

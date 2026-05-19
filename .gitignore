@@ -21,6 +21,7 @@ htmlcov/
 build/
 dist/
 electron/dist/
+electron/runtime/
 
 # Node（若日后在 scripts 下 npm install）
 node_modules/
