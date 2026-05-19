@@ -9,7 +9,7 @@ Automation **prefers attaching** to Chrome that is already listening on the CDP 
 - **Closing a CRM tab** is OK; `navigate-audit` / export can reopen the page in the **same** Chrome.
 - **Quitting the entire debug Chrome window** can drop fragile WeCom session state — avoid during a batch of exports.
 
-Shared probe / cold-start (no pkill): `scripts/cdp-probe.sh` is sourced by `export-with-self-heal.sh`. Env: `CHAT_AUDIT_CRM_CDP_BASE` (default `http://localhost:9222`), same as `crm-preflight.py`.
+Shared probe / cold-start (no pkill): `scripts/lib/cdp-bootstrap.mjs` is used by `export-with-self-heal.mjs`. Env: `CHAT_AUDIT_CRM_CDP_BASE` (default `http://localhost:9222`), same as `crm-preflight.py`.
 
 ## Start Chrome (macOS)
 

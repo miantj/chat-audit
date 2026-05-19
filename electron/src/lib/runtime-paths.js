@@ -55,23 +55,6 @@ export function runtimeExportEnv() {
   return env;
 }
 
-export function findBashForExport() {
-  if (process.platform === 'win32') {
-    const candidates = [
-      process.env.CHAT_AUDIT_BASH_BIN,
-      'C:\\Program Files\\Git\\bin\\bash.exe',
-      'C:\\Program Files (x86)\\Git\\bin\\bash.exe'
-    ].filter(Boolean);
-    for (const p of candidates) {
-      if (fs.existsSync(p)) {
-        return p;
-      }
-    }
-    return null;
-  }
-  return '/bin/bash';
-}
-
 export function verifyBundledRuntime() {
   if (!app?.isPackaged) {
     return { ok: true, dev: true, message: '开发模式：使用系统 Node / Python' };
@@ -89,18 +72,11 @@ export function verifyBundledRuntime() {
       '内嵌 crm-preflight 未找到，请安装 Python 3 + pip install pyinstaller websockets 后执行 pnpm run prepare-runtime'
     );
   }
-  const bash = findBashForExport();
-  if (!bash) {
-    issues.push(
-      'Windows 需要 Git for Windows（bash.exe），或设置环境变量 CHAT_AUDIT_BASH_BIN'
-    );
-  }
   return {
     ok: issues.length === 0,
     dev: false,
     issues,
     nodeBin,
-    preflightBin,
-    bash
+    preflightBin
   };
 }

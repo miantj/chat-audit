@@ -20,6 +20,13 @@
   "build": {
     "appId": "com.yishou.chat-audit-export",
     "productName": "一手聊天审计导出",
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "**/*",
+      "!runtime/**",
+      "!dist/**",
+      "!build-log.txt"
+    ],
     "extraResources": [
       {
         "from": "../chat-audit-export/scripts",
@@ -46,6 +53,7 @@
       "hardenedRuntime": false
     },
     "win": {
+      "executableName": "ChatAuditExport",
       "target": [
         {
           "target": "nsis",
@@ -58,7 +66,8 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "shortcutName": "一手聊天审计导出"
     }
   },
   "pnpm": {

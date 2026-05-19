@@ -426,12 +426,14 @@ async function getPageSession() {
     }
   }
 
+  // 与 crm-preflight 一致：优先员工表行数最多的标签页，避免误连空 tab / 弹窗页
+  states.sort((a, b) => (b.state.rowCount || 0) - (a.state.rowCount || 0));
   const selected =
-    states.find((entry) => entry.state.dialogVisible) ||
+    states.find((entry) => entry.state.rowCount > 0) ||
     states.find((entry) => entry.target.id === iframeParentId) ||
     states.find((entry) => entry.state.visibilityState === 'visible') ||
     states.find((entry) => entry.state.hasFocus) ||
-    states.find((entry) => entry.state.rowCount > 0) ||
+    states.find((entry) => entry.state.dialogVisible) ||
     states[0];
 
   if (!selected) {
@@ -1807,10 +1809,28 @@ export async function exportCurrentPage({
       `[retry-failed] reset checkpoint; will only process ${activeRetryList.length} failed conversation(s)`
     );
   }
-  const loadedCheckpoint = await loadCheckpoint(checkpointPath);
-  const checkpoint = isMetricCheckpoint(loadedCheckpoint) ? loadedCheckpoint : { main_page_no: 1, employee_name: null };
-  if (loadedCheckpoint.employee_name && !isMetricCheckpoint(loadedCheckpoint)) {
-    log('[checkpoint] ignoring old friend-list checkpoint; starting metric-driven export from the beginning');
+  let checkpoint = await loadCheckpoint(checkpointPath);
+  const clearMetricCheckpoint =
+    process.env.CHAT_AUDIT_CLEAR_METRIC_CHECKPOINT === '1' ||
+    process.env.CHAT_AUDIT_FULL_EXPORT === '1';
+  if (isRetryFailedPass) {
+    checkpoint = createEmptyCheckpoint();
+  } else if (clearMetricCheckpoint && isMetricCheckpoint(checkpoint)) {
+    log(
+      '[checkpoint] full export: clearing metric checkpoint; restarting from employee table'
+    );
+    checkpoint = createEmptyCheckpoint();
+    await saveCheckpoint(checkpointPath, checkpoint);
+  } else if (isMetricCheckpoint(checkpoint)) {
+    log(
+      `[checkpoint] resuming metric export at employee=${checkpoint.employee_name}`
+    );
+  } else if (checkpoint.employee_name) {
+    log(
+      '[checkpoint] ignoring old friend-list checkpoint; starting metric-driven export from the beginning'
+    );
+    checkpoint = createEmptyCheckpoint();
+    await saveCheckpoint(checkpointPath, checkpoint);
   }
   const pageSession = await getPageSession();
   const pageClient = pageSession.client;
@@ -2339,7 +2359,6 @@ export async function exportCurrentPage({
               }
             } catch (error) {
               const message = normalizeErrorMessage(error);
-              log(`[conversation] skipped error=${message}`);
 
               if (!shouldSkipConversationError(error)) {
                 if (error instanceof RateLimitedError) {
@@ -2355,6 +2374,8 @@ export async function exportCurrentPage({
                 }
                 throw error;
               }
+
+              log(`[conversation] skipped error=${message}`);
 
               if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
                 dataset.progress.failed_conversation_ids.push(conversationId);

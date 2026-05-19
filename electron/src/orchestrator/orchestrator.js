@@ -27,7 +27,7 @@ export class Orchestrator {
       throw new Error('请先选择输出目录');
     }
 
-    const cdpReady = await ensureAuditChrome(DEFAULT_CDP);
+    const cdpReady = await ensureAuditChrome(DEFAULT_CDP, { forceVerify: true });
     if (!cdpReady) {
       throw new Error(cdpUnavailableMessage(DEFAULT_CDP));
     }
@@ -35,9 +35,21 @@ export class Orchestrator {
     this.ev.emit('progress', {
       current: 0,
       total: 0,
-      message: '正在执行 Skill 预检（Chrome/部门/日期/gate-check/gate-start-export）…'
+      message: '正在准备 CRM 页面…'
     });
-    await prepareCrmPage({ startDate: start, department });
+    await prepareCrmPage({
+      startDate: start,
+      department,
+      onProgress: (p) => {
+        if (p?.message) {
+          this.ev.emit('progress', {
+            current: 0,
+            total: 0,
+            message: p.message
+          });
+        }
+      }
+    });
 
     await fs.mkdir(outputDir, { recursive: true });
 

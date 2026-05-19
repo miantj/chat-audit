@@ -7,6 +7,10 @@ import path from 'node:path';
 export const DEFAULT_CDP =
   process.env.CHAT_AUDIT_CRM_CDP_BASE || 'http://localhost:9222';
 
+/** 避免每次导出都跑 wmic/ps 扫全机 Chrome 进程 */
+let auditChromeVerifiedAt = 0;
+const AUDIT_CHROME_VERIFY_TTL_MS = 15_000;
+
 const CRM_URL =
   'https://tmscrm.yishouapp.com/#/salesQuality/chatAudit';
 
@@ -221,11 +225,15 @@ export async function coldStartChrome(cdpBase = DEFAULT_CDP) {
 }
 
 /** 保证连接的是专用 Chrome + 专用配置目录（登录态写在此 profile） */
-export async function ensureAuditChrome(cdpBase = DEFAULT_CDP) {
+export async function ensureAuditChrome(cdpBase = DEFAULT_CDP, { forceVerify = false } = {}) {
   if (await isCdpUp(cdpBase)) {
-    if (!isAuditChromeRunning(cdpBase)) {
+    const recentlyVerified =
+      !forceVerify &&
+      Date.now() - auditChromeVerifiedAt < AUDIT_CHROME_VERIFY_TTL_MS;
+    if (!recentlyVerified && !isAuditChromeRunning(cdpBase)) {
       throw new Error(cdpWrongInstanceMessage(cdpBase));
     }
+    auditChromeVerifiedAt = Date.now();
     return ensureCdpPage(cdpBase, CRM_URL);
   }
 

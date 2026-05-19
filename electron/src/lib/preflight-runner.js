@@ -6,9 +6,27 @@ import { getBundledPreflightBin } from './runtime-paths.js';
 
 const PYTHON_CMD = process.platform === 'win32' ? 'python' : 'python3';
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function drainProgressLines(lineBuf, chunk, onProgress) {
+  let buf = lineBuf + chunk;
+  const lines = buf.split('\n');
+  const rest = lines.pop() ?? '';
+  if (onProgress) {
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t.startsWith('PROGRESS: ')) {
+        continue;
+      }
+      try {
+        onProgress(JSON.parse(t.slice(10)));
+      } catch {
+        /* ignore malformed progress */
+      }
+    }
+  }
+  return rest;
+}
 
-export function runPreflight(args, { cdpBase = DEFAULT_CDP } = {}) {
+export function runPreflight(args, { cdpBase = DEFAULT_CDP, onProgress } = {}) {
   const scriptsDir = getScriptsDir();
   const preflightBin = getBundledPreflightBin();
   const cmd = preflightBin || PYTHON_CMD;
@@ -19,16 +37,26 @@ export function runPreflight(args, { cdpBase = DEFAULT_CDP } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, fullArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      cwd: scriptsDir
+      cwd: scriptsDir,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1'
+      }
     });
 
     let stdout = '';
     let stderr = '';
+    let lineBuf = '';
+
     proc.stdout.on('data', (d) => {
-      stdout += d.toString();
+      const chunk = d.toString('utf8');
+      stdout += chunk;
+      lineBuf = drainProgressLines(lineBuf, chunk, onProgress);
     });
+
     proc.stderr.on('data', (d) => {
-      stderr += d.toString();
+      stderr += d.toString('utf8');
     });
 
     proc.on('error', (err) => {
@@ -36,6 +64,9 @@ export function runPreflight(args, { cdpBase = DEFAULT_CDP } = {}) {
     });
 
     proc.on('close', (code) => {
+      if (lineBuf.trim() && onProgress) {
+        drainProgressLines('', `${lineBuf}\n`, onProgress);
+      }
       if (code === 0) resolve({ stdout, stderr, code });
       else {
         const detail = stderr.trim() || stdout.trim();
@@ -53,48 +84,6 @@ const CRM_LOGIN_HINT =
   '请在应用自动打开的专用 Chrome 中登录 CRM（配置目录 ~/.chrome-chat-audit-profile）。' +
   '日常浏览器的登录无效；关闭专用 Chrome 后再次打开，登录态会保留。';
 
-function parseJsonAfterColon(line, label) {
-  const idx = line.indexOf(label);
-  if (idx < 0) return null;
-  const rest = line.slice(idx + label.length).trim();
-  const start = rest.indexOf('{') >= 0 ? rest.indexOf('{') : rest.indexOf('[');
-  if (start < 0) return null;
-  try {
-    return JSON.parse(rest.slice(start));
-  } catch {
-    return null;
-  }
-}
-
-async function departmentIncludes(expectDept) {
-  const { stdout } = await runPreflight(['check-department']);
-  for (const line of stdout.split('\n')) {
-    const state = parseJsonAfterColon(line, 'Current cascader state:');
-    if (state?.tags?.some((t) => String(t).includes(expectDept))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-async function datesMatch(expectDate) {
-  const { stdout } = await runPreflight(['check-dates']);
-  for (const line of stdout.split('\n')) {
-    const raw = parseJsonAfterColon(line, 'Current date inputs:');
-    const vals = Array.isArray(raw) ? raw : null;
-    if (!vals || vals.length < 2) continue;
-    const norm = (v) =>
-      String(v || '')
-        .trim()
-        .slice(0, 10)
-        .replace(/\//g, '-');
-    if (norm(vals[0]) === expectDate && norm(vals[1]) === expectDate) {
-      return true;
-    }
-  }
-  return false;
-}
-
 export async function assertCrmLoggedIn() {
   const { stdout } = await runPreflight(['diagnose-state']);
   const trimmed = stdout.trim();
@@ -108,47 +97,14 @@ export async function assertCrmLoggedIn() {
 }
 
 /**
- * SKILL.md Steps 1–3 + gate-check + gate-start-export（与 Agent 手动预检一致）。
- * export-with-self-heal.sh 会再次做 CDP 探测与 gate-start-export（只能多不能少）。
+ * SKILL Steps 1–3 + gate-start-export，单次 Python（prepare-export）完成。
+ * export-with-self-heal.mjs 在 CHAT_AUDIT_START_GATE_DONE=1 时跳过重复 gate。
  */
-export async function prepareCrmPage({ startDate, department }) {
+export async function prepareCrmPage({ startDate, department, onProgress } = {}) {
   const expectDept = department || '大客私域顾问-总';
-
-  // Step 1：审计页 + 登录态
-  await runPreflight(['navigate-audit']);
-  const checkPage = await runPreflight(['check-page']);
-  if (/STATUS: on login page/i.test(checkPage.stdout)) {
-    throw new Error(CRM_LOGIN_HINT);
+  const args = ['prepare-export', '--expect-dept', expectDept];
+  if (startDate) {
+    args.push('--expect-date', startDate);
   }
-  await assertCrmLoggedIn();
-
-  // 关员工弹窗后再改主表（Step 3 date gate）
-  await runPreflight(['close-dialog']);
-
-  // Step 2：部门先于日期
-  if (!(await departmentIncludes(expectDept))) {
-    await runPreflight(['set-department', '--group', expectDept]);
-  }
-
-  // Step 3：主表日期
-  if (startDate && !(await datesMatch(startDate))) {
-    await runPreflight(['set-dates', '--date', startDate]);
-    await sleep(4000);
-  }
-
-  await runPreflight([
-    'gate-check',
-    '--expect-dept',
-    expectDept,
-    '--expect-date',
-    startDate
-  ]);
-
-  await runPreflight([
-    'gate-start-export',
-    '--expect-dept',
-    expectDept,
-    '--expect-date',
-    startDate
-  ]);
+  await runPreflight(args, { onProgress });
 }

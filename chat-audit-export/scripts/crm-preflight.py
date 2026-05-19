@@ -18,6 +18,23 @@ import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
+
+def _configure_stdio_utf8() -> None:
+    """Windows 默认 GBK；Electron 子进程与 PROGRESS 行需要 UTF-8。"""
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_configure_stdio_utf8()
+
 # Default Chrome remote debugging base (override with --cdp or CHAT_AUDIT_CDP_BASE).
 DEFAULT_CDP = os.environ.get("CHAT_AUDIT_CRM_CDP_BASE", "http://localhost:9222")
 
@@ -232,9 +249,39 @@ async def cmd_navigate_audit(cdp_base: str) -> None:
         await sess.send("Page.enable", {})
         await sess.send("Runtime.enable", {})
         await sess.navigate(CHAT_AUDIT_HASH)
-        await asyncio.sleep(3)
+        await asyncio.sleep(1.5)
         href = await sess.evaluate("window.location.href")
         print(f"Navigated to: {href}")
+
+
+async def ensure_audit_page(cdp_base: str) -> bool:
+    """Open chatAudit if needed. Returns True when navigation ran."""
+    page = _ensure_page_target(cdp_base)
+    async with CDPSession(page["webSocketDebuggerUrl"]) as sess:
+        await sess.send("Page.enable", {})
+        await sess.send("Runtime.enable", {})
+        href = await sess.evaluate("window.location.href") or ""
+    if "chataudit" in href.replace("_", "").lower():
+        print(f"Already on audit page: {href}")
+        return False
+    await cmd_navigate_audit(cdp_base)
+    return True
+
+
+def _emit_progress(step: str, message: str) -> None:
+    print(
+        f"PROGRESS: {json.dumps({'step': step, 'message': message}, ensure_ascii=False)}",
+        flush=True,
+    )
+
+
+def _dates_match_inputs(dates: list[str], expect_date: str) -> bool:
+    if not expect_date:
+        return True
+    d0 = _normalize_date_display(dates[0]) if dates else ""
+    d1 = _normalize_date_display(dates[1]) if len(dates) > 1 else ""
+    exp_n = _normalize_date_display(expect_date)
+    return d0 == exp_n and d1 == exp_n
 
 
 async def cmd_fill_login(cdp_base: str, args: argparse.Namespace) -> None:
@@ -347,11 +394,14 @@ async def cmd_check_dates(cdp_base: str) -> None:
     print(f"Current date inputs: {raw}")
 
 
-async def cmd_set_dates(cdp_base: str, date_str: str) -> None:
+async def cmd_set_dates(
+    cdp_base: str, date_str: str, *, skip_close: bool = False
+) -> None:
     # Use simulated clicks to set the outer date picker (next to department selector).
     # Steps: click picker input -> click target date cell -> done.
     # NOT the dialog's date picker; the dialog syncs automatically from the outer picker.
-    await cmd_close_dialog(cdp_base)
+    if not skip_close:
+        await cmd_close_dialog(cdp_base)
 
     parts = date_str.strip().split("-")
     if len(parts) != 3:
@@ -527,12 +577,12 @@ async def cmd_set_department(cdp_base: str, group_name: str) -> None:
     async with CDPSession(page["webSocketDebuggerUrl"]) as sess:
         await sess.send("Runtime.enable", {})
         await sess.evaluate(open_expr)
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.7)
         sel = await sess.evaluate(select_expr)
         print(f"Select result: {sel}")
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.7)
         await sess.evaluate(close_expr)
-        await asyncio.sleep(2)
+        await asyncio.sleep(1.2)
         ver = await sess.evaluate(verify_expr)
         print(f"Verify result: {ver}")
 
@@ -725,17 +775,20 @@ async def cmd_gate_start_export(cdp_base: str, expect_dept: str, expect_date: Op
     print(f"Department: {state.get('department')}")
     print(f"Rows visible: {state.get('rowCount')}")
     if state.get("state") == "AUDIT_EMPLOYEE_LIST_READY":
-        print("\n✅ START GATE PASSED — employee list ready; WeCom iframe will be checked after selecting a customer")
+        print(
+            "\n[OK] START GATE PASSED — employee list ready; "
+            "WeCom iframe will be checked after selecting a customer"
+        )
         return 0
     print("\nSTART GATE FAILED:")
     if state.get("state") == "EMPLOYEE_DIALOG_OPEN":
-        print("❌ Employee dialog is open; close it before starting a fresh export")
+        print("[X] Employee dialog is open; close it before starting a fresh export")
     elif state.get("state") == "AUDIT_PAGE_WRONG_FILTERS":
-        print("❌ Main table filters are wrong; run set-department / set-dates and gate-check")
+        print("[X] Main table filters are wrong; run set-department / set-dates and gate-check")
     elif state.get("state") == "CRM_LOGIN_REQUIRED":
-        print("❌ CRM login is required")
+        print("[X] CRM login is required")
     else:
-        print(f"❌ Current state is {state.get('state')}: {state.get('reason')}")
+        print(f"[X] Current state is {state.get('state')}: {state.get('reason')}")
     return 1
 
 
@@ -793,8 +846,62 @@ async def cmd_close_dialog(cdp_base: str) -> None:
     async with CDPSession(page["webSocketDebuggerUrl"]) as sess:
         await sess.send("Runtime.enable", {})
         result = await sess.evaluate(expr)
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
     print(result)
+
+
+CRM_LOGIN_HINT = (
+    "请在应用自动打开的专用 Chrome 中登录 CRM（配置目录 ~/.chrome-chat-audit-profile）。"
+    "日常浏览器的登录无效；关闭专用 Chrome 后再次打开，登录态会保留。"
+)
+
+
+async def cmd_prepare_export(
+    cdp_base: str, expect_dept: str, expect_date: Optional[str]
+) -> int:
+    """
+    Single-process SKILL preflight: audit page, close dialog, dept, dates, start gate.
+    Emits PROGRESS: lines for Electron UI (see preflight-runner.js).
+    """
+    _emit_progress("start", "准备 CRM 页面...")
+
+    navigated = await ensure_audit_page(cdp_base)
+    if navigated:
+        _emit_progress("navigate", "已打开聊天审计页")
+    else:
+        _emit_progress("navigate-skip", "已在审计页，跳过导航")
+
+    state = await diagnose_state(cdp_base, expect_dept, expect_date)
+    if state.get("state") == "CRM_LOGIN_REQUIRED":
+        where = state.get("href") or state.get("reason") or "登录页"
+        print(f"{CRM_LOGIN_HINT}\n当前页面：{where}", file=sys.stderr)
+        return 1
+
+    _emit_progress("close-dialog", "关闭员工弹窗（如有）...")
+    await cmd_close_dialog(cdp_base)
+
+    state = await diagnose_state(cdp_base, expect_dept, expect_date)
+
+    dept_tags = state.get("department") or []
+    if dept_tags != [expect_dept]:
+        _emit_progress("set-department", f"设置部门：{expect_dept}")
+        await cmd_set_department(cdp_base, expect_dept)
+        state = await diagnose_state(cdp_base, expect_dept, expect_date)
+
+    main_dates = state.get("mainDates") or state.get("dates") or []
+    if expect_date and not _dates_match_inputs(main_dates, expect_date):
+        _emit_progress("set-dates", f"设置日期：{expect_date}")
+        await cmd_set_dates(cdp_base, expect_date, skip_close=True)
+        await asyncio.sleep(1.5)
+        state = await diagnose_state(cdp_base, expect_dept, expect_date)
+    elif expect_date:
+        _emit_progress("dates-skip", f"日期已是 {expect_date}，跳过设置")
+
+    _emit_progress("gate", "校验员工列表就绪...")
+    rc = await cmd_gate_start_export(cdp_base, expect_dept, expect_date)
+    if rc == 0:
+        _emit_progress("ready", "预检通过，开始导出")
+    return rc
 
 
 async def cmd_get_employees(cdp_base: str) -> int:
@@ -871,25 +978,27 @@ async def cmd_gate_check(cdp_base: str, expect_dept: str, expect_date: Optional[
     # Department: exact tag list match (single expected tag).
     exp_tags = [expect_dept]
     if state["department"] != exp_tags:
-        errors.append(f"❌ Department NOT set to {expect_dept} (got {state['department']})")
+        errors.append(f"[X] Department NOT set to {expect_dept} (got {state['department']})")
     else:
-        print(f"✅ Department: {expect_dept}")
+        print(f"[OK] Department: {expect_dept}")
     if expect_date:
         d0 = _normalize_date_display(state["dates"][0]) if state["dates"] else ""
         d1 = _normalize_date_display(state["dates"][1]) if len(state["dates"]) > 1 else ""
         exp_n = _normalize_date_display(expect_date)
         if len(state["dates"]) == 2 and d0 == d1 == exp_n:
-            print(f"✅ Date range: {expect_date}")
+            print(f"[OK] Date range: {expect_date}")
         else:
-            errors.append(f"❌ Date range mismatch: {state['dates']} (expected single day {expect_date})")
+            errors.append(
+                f"[X] Date range mismatch: {state['dates']} (expected single day {expect_date})"
+            )
     if state["rowCount"] == 0:
-        errors.append("❌ No employee rows visible")
+        errors.append("[X] No employee rows visible")
     if errors:
         print("\nGATE FAILED:")
         for e in errors:
             print(e)
         return 1
-    print("\n✅ GATE PASSED — ready to export")
+    print("\n[OK] GATE PASSED — ready to export")
     return 0
 
 
@@ -970,6 +1079,14 @@ def main() -> None:
     p_start.add_argument("--expect-dept", default="大客私域顾问-总", help="Expected single cascader tag.")
     p_start.add_argument("--expect-date", default=None, help="Expected main table single day.")
 
+    p_prep = sub.add_parser(
+        "prepare-export",
+        help="One-shot: audit page, filters, gate-start-export (Electron fast path).",
+    )
+    _add_cdp_arg(p_prep)
+    p_prep.add_argument("--expect-dept", default="大客私域顾问-总", help="Expected single cascader tag.")
+    p_prep.add_argument("--expect-date", default=None, help="Expected main table single day.")
+
     p_emp = sub.add_parser("get-employees", help="Get employee list from main table.")
     _add_cdp_arg(p_emp)
 
@@ -1007,6 +1124,8 @@ def main() -> None:
             return await cmd_diagnose_state(cdp, args.expect_dept, args.expect_date)
         elif args.cmd == "gate-start-export":
             return await cmd_gate_start_export(cdp, args.expect_dept, args.expect_date)
+        elif args.cmd == "prepare-export":
+            return await cmd_prepare_export(cdp, args.expect_dept, args.expect_date)
         elif args.cmd == "get-employees":
             return await cmd_get_employees(cdp)
         return None

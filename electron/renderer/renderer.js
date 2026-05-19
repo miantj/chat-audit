@@ -534,11 +534,12 @@ onExportComplete((data) => {
 });
 
 onExportError((error) => {
-  const msg =
+  const raw =
     typeof error === 'string'
       ? error
       : error?.message || JSON.stringify(error);
-  addLog(`错误: ${msg}`, 'error');
+  const msg = raw.startsWith('错误:') ? raw : `错误: ${raw}`;
+  addLog(msg, 'error');
   setUIState('idle');
 });
 

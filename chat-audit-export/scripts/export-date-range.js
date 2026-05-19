@@ -4,6 +4,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { exportCurrentPage } from './export-current-page.js';
 import { getDefaultCheckpointPath } from './lib/checkpoint.js';
+import { resolveExportOutputPath } from './lib/export-path.js';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -94,14 +95,7 @@ function isPathInside(child, parent) {
   return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
-function getDefaultOutputPath() {
-  const exportDir = process.env.CHAT_AUDIT_EXPORT_DIR
-    ? path.resolve(cwd, process.env.CHAT_AUDIT_EXPORT_DIR)
-    : path.join(cwd, 'exports');
-  return path.join(exportDir, `chat-audit-${dateStart}.json`);
-}
-
-const outputPath = path.resolve(cwd, process.env.OUTPUT_PATH || opts.out || getDefaultOutputPath());
+const outputPath = resolveExportOutputPath(opts.out, { cwd, dateStart });
 if (isPathInside(outputPath, skillRoot)) {
   console.error(
     [
@@ -317,16 +311,21 @@ try {
     }
   });
 
-  console.log(JSON.stringify({
-    event: result.shutdown ? 'export-shutdown' : 'export-complete',
-    ...result
-  }, null, 2));
+  console.log(
+    JSON.stringify({
+      event: result.shutdown ? 'export-shutdown' : 'export-complete',
+      ...result
+    })
+  );
 
   process.exit(0);
 } catch (error) {
-  console.error(JSON.stringify({
-    event: 'export-error',
-    message: error.message || String(error)
-  }, null, 2));
+  // 必须单行 JSON，供 Electron / export-with-self-heal.mjs 按行解析
+  console.error(
+    JSON.stringify({
+      event: 'export-error',
+      message: error.message || String(error)
+    })
+  );
   process.exit(1);
 }

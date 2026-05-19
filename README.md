@@ -6,7 +6,7 @@
 
 - **macOS** 或 **Windows 10/11**
 - **Google Chrome**（推荐；应用会启动专用配置目录，需用户本机已安装 Chrome）
-- **Windows 额外需要**： [Git for Windows](https://git-scm.com/)（提供 `bash.exe`，用于导出脚本）
+- **Windows / macOS**：导出由 Node 脚本 `export-with-self-heal.mjs` 执行，无需 Git 或 bash
 
 **开发模式**（`pnpm start`）仍使用本机 **Node.js 22+** 与 **Python 3.10+**（`pip install -r chat-audit-export/scripts/requirements-preflight.txt`）。
 
@@ -87,7 +87,7 @@ pnpm run build       # Windows NSIS（须在 Windows 上执行）
 
 ## 无 GUI：Agent / CLI
 
-无需 Electron，在 `chat-audit-export/scripts/` 下按 `chat-audit-export/SKILL.md` 执行 `crm-preflight.py`、`export-date-range.js`、`export-with-self-heal.sh` 等即可。
+无需 Electron，在 `chat-audit-export/scripts/` 下按 `chat-audit-export/SKILL.md` 执行 `crm-preflight.py`、`export-with-self-heal.mjs` 等即可。
 
 ## 依赖说明
 

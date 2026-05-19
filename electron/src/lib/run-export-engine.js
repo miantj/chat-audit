@@ -1,5 +1,6 @@
 import { spawn, execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import { getScriptsDir, getSkillRoot } from './paths.js';
 import { PAUSE_FILE, STOP_FILE } from './signal-files.js';
@@ -8,37 +9,19 @@ import {
   FAILED_RETRY_MAX,
   readFailedRetryPassesUsed
 } from './failed-retry-meta.js';
-import {
-  findBashForExport,
-  getBundledNodeBin,
-  runtimeExportEnv
-} from './runtime-paths.js';
+import { getBundledNodeBin, runtimeExportEnv } from './runtime-paths.js';
 
-const LARGE_JSON_BYTES = 40 * 1024 * 1024;
+const exportJsonStats = await import(
+  pathToFileURL(
+    path.join(getScriptsDir(), 'lib', 'export-json-stats.js')
+  ).href
+);
+
+const { countFailedConversations: countFailedFromLib, LARGE_JSON_BYTES } =
+  exportJsonStats;
 
 export function countFailedConversations(outputPath) {
-  if (!fs.existsSync(outputPath)) {
-    return 0;
-  }
-  const stat = fs.statSync(outputPath);
-  if (stat.size > LARGE_JSON_BYTES) {
-    try {
-      const n = execFileSync(
-        getBundledNodeBin(),
-        [
-          '-e',
-          "const fs=require('fs');const d=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log((d.progress?.failed_conversation_ids||[]).length);",
-          path.resolve(outputPath)
-        ],
-        { encoding: 'utf8' }
-      ).trim();
-      return Number(n) || 0;
-    } catch {
-      return 0;
-    }
-  }
-  const data = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
-  return data?.progress?.failed_conversation_ids?.length ?? 0;
+  return countFailedFromLib(outputPath, getBundledNodeBin());
 }
 
 function countExportedConversations(outputPath) {
@@ -125,7 +108,8 @@ export const MODERATE_PACED_ENV = {
 };
 
 /**
- * 与 SKILL.md Step 4 一致：export-with-self-heal.sh（CDP、gate-start、重试自愈、export-date-range）。
+ * 与 SKILL.md Step 4 一致：export-with-self-heal（CDP、gate-start、重试自愈、export-date-range）。
+ * 使用 scripts/export-with-self-heal.mjs（纯 Node）。
  */
 export function runExportEngine(options, eventEmitter) {
   const start = options.start ?? options.startDate;
@@ -134,12 +118,13 @@ export function runExportEngine(options, eventEmitter) {
 
   const scriptsDir = getScriptsDir();
   const skillRoot = getSkillRoot();
-  const shellScript = path.join(scriptsDir, 'export-with-self-heal.sh');
-  const outputPath = path.join(outputDir, `chat-audit-${start}.json`);
+  const nodeRunner = path.join(scriptsDir, 'export-with-self-heal.mjs');
+  const nodeBin = getBundledNodeBin();
+  const outputPath = path.resolve(outputDir, `chat-audit-${start}.json`);
   const expectDept = options.department || '大客私域顾问-总';
 
-  const shellArgs = [
-    shellScript,
+  const runnerArgs = [
+    nodeRunner,
     `--start=${start}`,
     `--end=${end}`,
     `--out=${outputPath}`,
@@ -164,7 +149,7 @@ export function runExportEngine(options, eventEmitter) {
     });
   }
   if (resumeFailedOnly) {
-    shellArgs.push('--retry-failed');
+    runnerArgs.push('--retry-failed');
     eventEmitter?.emit('progress', {
       current: 0,
       total: failedCount,
@@ -175,12 +160,13 @@ export function runExportEngine(options, eventEmitter) {
     });
   }
 
-  const bash = findBashForExport();
-  if (!bash) {
-    throw new Error(
-      '未找到 bash（Windows 请安装 Git for Windows，或设置 CHAT_AUDIT_BASH_BIN）'
-    );
-  }
+  const clearMetricCheckpoint =
+    options.fullExport === true ||
+    (failedCount > 0 &&
+      options.fullExport !== true &&
+      retryBudgetLeft <= 0 &&
+      !resumeFailedOnly);
+
   const exportEnv = {
     ...process.env,
     ...MODERATE_PACED_ENV,
@@ -188,29 +174,20 @@ export function runExportEngine(options, eventEmitter) {
     CHAT_AUDIT_CRM_CDP_BASE: DEFAULT_CDP,
     CHAT_AUDIT_PAUSE_FILE: PAUSE_FILE,
     CHAT_AUDIT_STOP_FILE: STOP_FILE,
-    CHAT_AUDIT_EXPECT_DEPT: expectDept
+    CHAT_AUDIT_EXPECT_DEPT: expectDept,
+    CHAT_AUDIT_START_GATE_DONE: '1',
+    CHAT_AUDIT_CALLER_CWD: path.resolve(outputDir),
+    CHAT_AUDIT_EXPORT_DIR: path.resolve(outputDir),
+    OUTPUT_PATH: outputPath,
+    ...(clearMetricCheckpoint
+      ? { CHAT_AUDIT_CLEAR_METRIC_CHECKPOINT: '1' }
+      : {})
   };
-  const useStdbuf =
-    process.platform !== 'win32' &&
-    (() => {
-      try {
-        execFileSync('which', ['stdbuf'], { stdio: 'pipe' });
-        return true;
-      } catch {
-        return false;
-      }
-    })();
-  const proc = useStdbuf
-    ? spawn('stdbuf', ['-oL', '-eL', bash, ...shellArgs], {
-        cwd: skillRoot,
-        env: exportEnv,
-        stdio: ['ignore', 'pipe', 'pipe']
-      })
-    : spawn(bash, shellArgs, {
-        cwd: skillRoot,
-        env: exportEnv,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
+  const proc = spawn(nodeBin, runnerArgs, {
+    cwd: skillRoot,
+    env: exportEnv,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
 
   let stdoutBuf = '';
   let stderrBuf = '';
@@ -276,12 +253,8 @@ export function runExportEngine(options, eventEmitter) {
             return;
           }
         }
-        if (evt.event === 'export-error' && evt.message) {
-          eventEmitter.emit('progress', {
-            current: 0,
-            total: -1,
-            message: `错误: ${evt.message}`
-          });
+        if (evt.event === 'export-error') {
+          return;
         }
         if (evt.event === 'export-csv-complete' && evt.csvPath) {
           csvPath = evt.csvPath;
@@ -332,8 +305,8 @@ export function runExportEngine(options, eventEmitter) {
 
     if (
       trimmed.startsWith('[') ||
-      trimmed.startsWith('✅') ||
-      trimmed.startsWith('⚠️') ||
+      trimmed.startsWith('[OK]') ||
+      trimmed.startsWith('[warn]') ||
       trimmed.startsWith('===') ||
       trimmed.startsWith('Export ') ||
       trimmed.startsWith('[self-heal]') ||
@@ -348,7 +321,7 @@ export function runExportEngine(options, eventEmitter) {
   };
 
   const feedChunk = (chunk, isStdout) => {
-    const text = chunk.toString();
+    const text = chunk.toString('utf8');
     if (isStdout) stdoutBuf += text;
     else stderrBuf += text;
     lineBuf += text;
@@ -365,9 +338,7 @@ export function runExportEngine(options, eventEmitter) {
   const done = new Promise((resolve, reject) => {
     proc.on('error', (err) => {
       reject(
-        new Error(
-          `无法启动导出脚本（需 bash 与 chat-audit-export/scripts/export-with-self-heal.sh）：${err.message}`
-        )
+        new Error(`无法启动导出脚本（export-with-self-heal.mjs）：${err.message}`)
       );
     });
     proc.on('close', (code) => {
@@ -386,10 +357,15 @@ export function runExportEngine(options, eventEmitter) {
           reject(err);
           return;
         }
+        const employeeTotal = summary?.employeeProgressTotal ?? 0;
         if (conversationCount === 0 && !shutdown) {
+          const hint =
+            employeeTotal <= 0
+              ? '主表未识别到员工行（常见原因：旧 checkpoint 已清除，请重试；或日期/部门与页面不一致）。'
+              : '未导出任何会话。';
           reject(
             new Error(
-              '导出已结束但未产生任何会话记录。请确认主表有员工行、日期/部门正确，且专用 Chrome 已登录 CRM。'
+              `导出已结束但未产生任何会话记录。${hint}请确认专用 Chrome 已登录 CRM，日期/部门与页面一致。`
             )
           );
           return;
@@ -410,9 +386,8 @@ export function runExportEngine(options, eventEmitter) {
         const exportError = parseExportErrorFromLogs(logText);
         reject(
           new Error(
-            exportError
-              ? `导出失败: ${exportError}`
-              : `导出失败 (exit ${code})\n${logText}`.slice(0, 1200)
+            exportError ||
+              `导出失败 (exit ${code})\n${logText}`.slice(0, 1200)
           )
         );
       }

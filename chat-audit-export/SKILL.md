@@ -42,7 +42,7 @@ metadata:
 | Script | Role |
 |--------|------|
 | `scripts/crm-preflight.py` | CDP: login, dates, department, **diagnose-state**, **gate-start-export**, **gate-check**, **gate-wecom** (subcommands) |
-| `scripts/cdp-probe.sh` | CDP URL probe + cold-start Chrome (no pkill); sourced by `export-with-self-heal.sh` |
+| `scripts/lib/cdp-bootstrap.mjs` | CDP URL probe + cold-start Chrome (no pkill); used by `export-with-self-heal.mjs` |
 | `scripts/export-date-range.js` | Bulk export for `--start` / `--end` (`--retry-failed`, `--fast`) |
 | `scripts/reconcile.js` | JSONL → deduped dataset JSON |
 | `scripts/json-to-csv-business.js` | Business CSV + `transcript` column |
@@ -61,10 +61,10 @@ Progress:
 - [ ] Step 2: Date range on main table matches export day(s)
 - [ ] Step 3: Department cascader = **大客私域顾问-总** (or user-chosen `--expect-dept`)
 - [ ] Gate: `gate-check` exit 0
-- [ ] Gate Start: `gate-start-export` exit 0 (or use `export-with-self-heal.sh`, which runs it for you)
-- [ ] Step 4: `export-with-self-heal.sh` (self-iteration enabled) or plain `export-date-range.js`
+- [ ] Gate Start: `gate-start-export` exit 0 (or use `export-with-self-heal.mjs`, which runs it for you)
+- [ ] Step 4: `export-with-self-heal.mjs` (self-iteration enabled) or plain `export-date-range.js`
 - [ ] Step 5 (optional): `reconcile.js`
-- [ ] Step 5b: Business CSV — **auto-generated** by `export-with-self-heal.sh` as `{basename}.business.csv` (or run `json-to-csv-business.js` manually)
+- [ ] Step 5b: Business CSV — **auto-generated** by `export-with-self-heal.mjs` as `{basename}.business.csv` (or run `json-to-csv-business.js` manually)
 - [ ] Step 6: Generate report ([references/report-template.md](references/report-template.md))
 - [ ] Step 7: Leave the debug Chrome open for the next export. Do **not** close, quit, Ctrl-C, or otherwise stop the browser after a successful run; only close script/CDP websocket connections.
 
@@ -144,10 +144,10 @@ python3 scripts/crm-preflight.py diagnose-state \
 
 ### Step 4 — Export (with self-iteration)
 
-**Preferred:** Use `export-with-self-heal.sh` for automatic retry and self-recovery.
+**Preferred:** Use `export-with-self-heal.mjs` for automatic retry and self-recovery.
 
 ```bash
-bash scripts/export-with-self-heal.sh \
+node scripts/export-with-self-heal.mjs \
   --start=YYYY-MM-DD \
   --end=YYYY-MM-DD \
   --keywords= \
@@ -306,7 +306,7 @@ The export scripts respect these file-based signals (any agent can use them):
 
 ## Self-Iteration (v2.4)
 
-The `export-with-self-heal.sh` wrapper adds automatic retry and self-improvement:
+The `export-with-self-heal.mjs` wrapper adds automatic retry and self-improvement:
 
 | Error type | Self-healable | Max retries |
 |---|---|---|

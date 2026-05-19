@@ -1,5 +1,6 @@
 {
   "name": "chat-audit",
+  "type": "module",
   "private": true,
   "description": "一手聊天审计导出工具",
   "scripts": {

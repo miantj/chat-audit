@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 
-/** 与 export-with-self-heal.sh 中 FAILED_RETRY_MAX 保持一致 */
+/** 与 export-with-self-heal.mjs 中 FAILED_RETRY_MAX 保持一致 */
 export const FAILED_RETRY_MAX = 2;
 
 export function failedRetryMetaPath(outputPath) {
