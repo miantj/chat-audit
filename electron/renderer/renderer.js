@@ -14,6 +14,8 @@ const {
   getSettings,
   saveSettings,
   onExportProgress,
+  onExportPaused,
+  onExportResumed,
   onExportComplete,
   onExportError,
   onChromeStatus
@@ -22,7 +24,6 @@ const {
 const startDate = document.getElementById('startDate');
 const endDate = document.getElementById('endDate');
 const singleDayMode = document.getElementById('singleDayMode');
-const dateSummary = document.getElementById('dateSummary');
 const department = document.getElementById('department');
 const outputDir = document.getElementById('outputDir');
 const selectDirBtn = document.getElementById('selectDir');
@@ -32,9 +33,21 @@ const resumeBtn = document.getElementById('resumeBtn');
 const stopBtn = document.getElementById('stopBtn');
 
 const statusBar = document.getElementById('statusBar');
+const statusProgress = document.getElementById('statusProgress');
+const progressBar = document.getElementById('progressBar');
 const progressFill = document.getElementById('progressFill');
+const progressPercentLabel = document.getElementById('progressPercentLabel');
 const progressText = document.getElementById('progressText');
 const logContent = document.getElementById('logContent');
+
+let exportUiState = 'idle';
+/** 最近一次带 current/total 的进度，避免普通日志把进度条打回「进行中」 */
+let lastExportProgress = { current: 0, total: 0 };
+let lastPercentShown = 0;
+/** employees | conversation（补跑 failed_conversation_ids） */
+let progressUnit = 'employee';
+/** 用户点继续后跳过脚本侧 export-resumed 的重复日志 */
+let suppressResumeLog = false;
 
 /** 本地时区 YYYY-MM-DD（避免 toISOString 差一天） */
 function localDateStr(d = new Date()) {
@@ -67,22 +80,6 @@ function applySingleDayMode() {
       endDate.value = startDate.value;
     }
   }
-  updateDateSummary();
-}
-
-function updateDateSummary() {
-  const { start, end } = getDateRange();
-  if (!start) {
-    dateSummary.textContent = '请选择导出日期';
-    dateSummary.classList.add('date-summary-warn');
-    return;
-  }
-  dateSummary.classList.remove('date-summary-warn');
-  if (start === end) {
-    dateSummary.textContent = `将导出 ${start} 当天的聊天记录（CRM 主表按该日筛选）`;
-  } else {
-    dateSummary.textContent = `将导出 ${start} 至 ${end} 的聊天记录（主表按开始日 ${start} 筛选）`;
-  }
 }
 
 function getDateRange() {
@@ -104,23 +101,134 @@ function setDatePreset(preset) {
   persistFormSettings();
 }
 
-function setUIState(state) {
-  const running = state === 'running' || state === 'paused';
+function statusStateText() {
+  if (exportUiState === 'pausing') return '暂停中…';
+  if (exportUiState === 'paused') return '已暂停';
+  if (exportUiState === 'running') return '导出中…';
+  return '就绪';
+}
+
+function refreshStatusLabel() {
+  const text = statusStateText();
+  if (statusBar) {
+    statusBar.textContent = text;
+  }
+  if (progressBar) {
+    progressBar.setAttribute('aria-label', text);
+  }
+}
+
+function employeeProgressPercent(current, total) {
+  if (total <= 0) return 0;
+  if (current >= total) return 100;
+  return Math.round((current / total) * 100);
+}
+
+function formatProgressCaption(current, total, unit = progressUnit, options = {}) {
+  if (total <= 0) {
+    return unit === 'conversation' ? '续传 —' : '员工 —';
+  }
+  if (unit === 'conversation') {
+    return `续传 ${current}/${total}`;
+  }
+  if (options.resume) {
+    return `续传 ${current}/${total}`;
+  }
+  return `员工 ${current}/${total}`;
+}
+
+function setProgressPercentOnBar(percent) {
+  if (progressPercentLabel) {
+    progressPercentLabel.textContent = `${percent}%`;
+  }
+  if (progressBar) {
+    progressBar.classList.toggle('progress-bar--fill-high', percent >= 50);
+  }
+}
+
+function isRetryFailedProgress(unit, phase) {
+  return unit === 'conversation' || phase === 'retry-failed';
+}
+
+/**
+ * 进度条更新。主流程单调不降；补跑 failed 会话按实际比例更新。
+ */
+function applyEmployeeProgressBar(current, total, options = {}) {
+  if (total <= 0) return;
+  const unit = options.unit || progressUnit;
+  const phase = options.phase || null;
+  const retryMode = isRetryFailedProgress(unit, phase);
+  const percent = employeeProgressPercent(current, total);
+  if (options.reset || options.allowDecrease || retryMode) {
+    lastPercentShown = percent;
+  } else {
+    lastPercentShown = Math.max(lastPercentShown, percent);
+  }
+  progressFill.classList.remove('is-indeterminate');
+  progressFill.style.width = `${lastPercentShown}%`;
+  setProgressPercentOnBar(lastPercentShown);
+  const resume = Boolean(options.resume);
+  progressText.textContent = formatProgressCaption(current, total, unit, { resume });
+  if (progressBar) {
+    progressBar.setAttribute('aria-valuenow', String(lastPercentShown));
+  }
+  lastExportProgress = { current: Math.min(current, total), total };
+  progressUnit = unit;
+}
+
+/** 导出成功结束时展示 100%（须在 setUIState('idle') 之前调用） */
+function finishExportProgressBar() {
+  const { total } = lastExportProgress;
+  if (total > 0) {
+    applyEmployeeProgressBar(total, total);
+    return;
+  }
+  lastPercentShown = 100;
+  progressFill.classList.remove('is-indeterminate');
+  progressFill.style.width = '100%';
+  setProgressPercentOnBar(100);
+  progressText.textContent = '完成';
+  if (progressBar) {
+    progressBar.setAttribute('aria-valuenow', '100');
+  }
+}
+
+function resetProgress() {
+  lastExportProgress = { current: 0, total: 0 };
+  lastPercentShown = 0;
+  progressUnit = 'employee';
+  progressFill.style.width = '0%';
+  progressFill.classList.remove('is-indeterminate');
+  setProgressPercentOnBar(0);
+  if (progressBar) {
+    progressBar.classList.remove('progress-bar--fill-high');
+  }
+  progressText.textContent = '员工 —';
+  if (progressBar) {
+    progressBar.setAttribute('aria-valuenow', '0');
+  }
+}
+
+function setProgressVisible(visible) {
+  if (statusProgress) {
+    statusProgress.classList.toggle('is-hidden', !visible);
+  }
+}
+
+function setUIState(state, options = {}) {
+  exportUiState = state;
+  const running =
+    state === 'running' || state === 'paused' || state === 'pausing';
   startBtn.disabled = running;
   pauseBtn.disabled = state !== 'running';
-  resumeBtn.disabled = state !== 'paused';
+  resumeBtn.disabled = state !== 'paused' && state !== 'pausing';
   stopBtn.disabled = !running;
+  setProgressVisible(running || Boolean(options.showProgress));
 
-  if (state === 'idle') {
-    statusBar.className = 'status-bar';
-    statusBar.textContent = '就绪';
-  } else if (state === 'running') {
-    statusBar.className = 'status-bar';
-    statusBar.textContent = '导出中…';
-  } else if (state === 'paused') {
-    statusBar.className = 'status-bar';
-    statusBar.textContent = '已暂停';
+  if (state === 'idle' && !options.keepProgress) {
+    resetProgress();
   }
+  refreshStatusLabel();
 }
 
 async function persistFormSettings() {
@@ -173,14 +281,89 @@ function addLog(message, type = 'info') {
 }
 
 function updateProgress(data) {
-  if (data.message) addLog(data.message, 'info');
+  const msg = data.message;
+  // 过滤脚本侧发的暂停/恢复通知
+  if (
+    msg &&
+    typeof msg === 'string' &&
+    (msg.includes('"event":"export-paused"') ||
+      msg.includes('"event":"export-resumed"'))
+  ) {
+    return;
+  }
+
+  const total = typeof data.total === 'number' && data.total > 0 ? data.total : 0;
   const current = data.current ?? data.completed ?? 0;
-  const total = data.total ?? 0;
+
+  if (msg && typeof msg === 'string') {
+    if (msg.includes('[progress-debug]')) {
+      addLog(msg, 'info');
+    } else {
+      const isProgressTicker =
+        /^员工 \d+\/\d+/.test(msg) || /^续传 \d+\/\d+/.test(msg);
+      if (!isProgressTicker) {
+        addLog(msg, 'info');
+      }
+    }
+  }
+
+  const retryPhase =
+    data.phase === 'retry-failed' ||
+    data.unit === 'conversation' ||
+    (typeof msg === 'string' && msg.includes('[retry-failed]'));
+
+  if (data.reset || retryPhase) {
+    lastPercentShown = 0;
+  }
+  if (data.unit === 'conversation' || data.unit === 'employee') {
+    progressUnit = data.unit;
+  }
+  if (retryPhase) {
+    progressUnit = 'conversation';
+  }
+
+  if (retryPhase && Boolean(data.reset)) {
+    progressUnit = 'conversation';
+    lastPercentShown = 0;
+    progressFill.classList.remove('is-indeterminate');
+    progressFill.style.width = '0%';
+    setProgressPercentOnBar(0);
+    if (total > 0) {
+      applyEmployeeProgressBar(current, total, {
+        reset: true,
+        allowDecrease: true,
+        unit: 'conversation',
+        phase: 'retry-failed'
+      });
+    } else {
+      progressText.textContent = '续传 —';
+      if (progressBar) {
+        progressBar.setAttribute('aria-valuenow', '0');
+      }
+    }
+    return;
+  }
+
+  const resume =
+    progressUnit === 'employee' &&
+    (data.phase === 'resume' ||
+      (typeof msg === 'string' && msg.includes('续传')));
+
   if (total > 0) {
-    const percent = Math.min(100, Math.round((current / total) * 100));
-    progressFill.style.width = `${percent}%`;
-    progressText.textContent = `${percent}%`;
-  } else if (data.message) {
+    applyEmployeeProgressBar(current, total, {
+      reset: Boolean(data.reset) || retryPhase,
+      allowDecrease: Boolean(data.reset) || retryPhase,
+      unit: progressUnit,
+      phase: data.phase,
+      resume
+    });
+  } else if (current > 0) {
+    // 无总量时显示活动状态
+    progressFill.classList.add('is-indeterminate');
+    progressFill.style.width = '35%';
+    if (progressPercentLabel) {
+      progressPercentLabel.textContent = '…';
+    }
     progressText.textContent = '…';
   }
 }
@@ -203,12 +386,10 @@ startDate.addEventListener('change', () => {
   } else if (endDate.value < startDate.value) {
     endDate.value = startDate.value;
   }
-  updateDateSummary();
   persistFormSettings();
 });
 
 endDate.addEventListener('change', () => {
-  updateDateSummary();
   persistFormSettings();
 });
 
@@ -228,6 +409,7 @@ startBtn.addEventListener('click', async () => {
     return;
   }
 
+  resetProgress();
   setUIState('running');
   addLog(`开始导出：${start}${start === end ? '' : ` ~ ${end}`}`);
   await persistFormSettings();
@@ -248,21 +430,24 @@ startBtn.addEventListener('click', async () => {
 });
 
 pauseBtn.addEventListener('click', async () => {
+  setUIState('pausing');
+  addLog('正在暂停（等待当前步骤结束）…', 'info');
   const result = await pauseExport();
-  if (result.success) {
-    setUIState('paused');
-    addLog('已暂停');
-  } else {
+  if (!result.success) {
+    setUIState('running');
     addLog(`暂停失败: ${result.error}`, 'error');
   }
 });
 
 resumeBtn.addEventListener('click', async () => {
+  const wasPausing = exportUiState === 'pausing';
+  suppressResumeLog = true;
   const result = await resumeExport();
   if (result.success) {
     setUIState('running');
-    addLog('已继续');
+    addLog(wasPausing ? '已取消暂停' : '已继续', 'info');
   } else {
+    suppressResumeLog = false;
     addLog(`继续失败: ${result.error}`, 'error');
   }
 });
@@ -270,10 +455,8 @@ resumeBtn.addEventListener('click', async () => {
 stopBtn.addEventListener('click', async () => {
   const result = await stopExport();
   if (result.success) {
-    setUIState('idle');
+    setUIState('idle', { keepProgress: true, showProgress: true });
     addLog('已停止');
-    progressFill.style.width = '0%';
-    progressText.textContent = '0%';
   } else {
     addLog(`停止失败: ${result.error}`, 'error');
   }
@@ -300,15 +483,46 @@ selectDirBtn.addEventListener('click', async () => {
 
 onExportProgress((data) => updateProgress(data));
 
+if (onExportPaused) {
+  onExportPaused(() => {
+    setUIState('paused');
+    addLog('已暂停', 'info');
+  });
+}
+
+if (onExportResumed) {
+  onExportResumed(() => {
+    setUIState('running');
+    if (!suppressResumeLog) {
+      addLog('已继续', 'info');
+    }
+    suppressResumeLog = false;
+  });
+}
+
 onExportComplete((data) => {
-  setUIState('idle');
   const elapsed = data.elapsed != null ? `，耗时 ${data.elapsed}s` : '';
-  const total =
+  const convTotal =
     data.total != null && data.total > 0 ? `，共 ${data.total} 条会话` : '';
   if (data.shutdown) {
-    addLog(`导出已停止（进度已保存）${elapsed}${total}`, 'info');
+    addLog(`导出已停止（进度已保存）${elapsed}${convTotal}`, 'info');
+    setUIState('idle', { keepProgress: true, showProgress: true });
   } else {
-    addLog(`导出完成${elapsed}${total}`, 'success');
+    addLog(`导出完成${elapsed}${convTotal}`, 'success');
+    const unit =
+      data.progressUnit === 'conversation' ? 'conversation' : progressUnit;
+    const empTotal = data.employeeProgressTotal || lastExportProgress.total;
+    const empCurrent = data.employeeProgressCurrent ?? empTotal;
+    if (empTotal > 0) {
+      applyEmployeeProgressBar(empCurrent, empTotal, {
+        unit,
+        phase: unit === 'conversation' ? 'retry-failed' : null,
+        allowDecrease: true
+      });
+    } else {
+      finishExportProgressBar();
+    }
+    setUIState('idle', { keepProgress: true, showProgress: true });
   }
   if (data.failed > 0) {
     addLog(`仍有 ${data.failed} 条会话失败（已自动补跑最多 3 次）`, 'info');
@@ -317,8 +531,6 @@ onExportComplete((data) => {
   if (data.csvPath) {
     addLog(`CSV: ${data.csvPath}`, 'success');
   }
-  progressFill.style.width = '100%';
-  progressText.textContent = '100%';
 });
 
 onExportError((error) => {
@@ -333,7 +545,9 @@ onExportError((error) => {
 if (onChromeStatus) {
   onChromeStatus((data) => {
     if (data.ready) {
-      statusBar.textContent = 'Chrome 已就绪';
+      if (exportUiState === 'idle' && statusBar) {
+        statusBar.textContent = data.message || 'Chrome 已就绪';
+      }
       addLog(data.message || 'Chrome 调试环境已就绪', 'success');
     } else if (data.message) {
       addLog(data.message, 'info');

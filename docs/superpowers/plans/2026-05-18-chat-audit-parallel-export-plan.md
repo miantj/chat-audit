@@ -4,7 +4,7 @@
 
 **Goal:** 将现有单tab串行导出改为三tab并行导出，速度提升3-5x，打包为exe供用户直接使用。
 
-**Architecture:** 在 Electron 主进程内运行 Node.js 编写的 Orchestrator，管理3个独立的CDP连接并行处理员工对话。SharedState通过append-only JSONL实现跨tab的断点续跑。Python运行时通过PyInstaller打包进Electron。
+**Architecture:** 在 Electron 主进程内运行 Node.js 编写的 Orchestrator，管理3个独立的CDP连接并行处理员工对话。SharedState通过append-only JSONL实现跨tab的断点续跑。CRM 预检仍调用系统 Python 3 + `crm-preflight.py`（见 `chat-audit-export/scripts/requirements-preflight.txt`）。
 
 **Tech Stack:** Electron + electron-builder, Node.js 22, Python 3 (用户自装), websockets, ws
 

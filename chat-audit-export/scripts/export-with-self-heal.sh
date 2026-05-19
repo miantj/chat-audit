@@ -439,7 +439,8 @@ while true; do
   fi
   echo ""
   if [[ -n "$RETRY_FAILED" ]]; then
-    echo "========== Retry failed conversations (${failed_retry_count}/${FAILED_RETRY_MAX}, loop $attempt) =========="
+    _retry_failed_n=$(count_failed_conversations)
+    echo "========== Retry failed conversations (${_retry_failed_n} failed, pass ${failed_retry_count}/${FAILED_RETRY_MAX}, loop $attempt) =========="
   else
     echo "========== Export attempt $attempt (self-heal max $MAX_RETRIES per error type) =========="
   fi
@@ -452,7 +453,11 @@ while true; do
   cd "$SCRIPT_ROOT"
   tmp_out=$(mktemp "${TMPDIR:-/tmp}/chat-audit-export.XXXXXX")
   set +e
-  node scripts/export-date-range.js \
+  retry_env=()
+  if [[ -n "$RETRY_FAILED" ]]; then
+    retry_env=(CHAT_AUDIT_RETRY_FAILED=1)
+  fi
+  env "${retry_env[@]}" node scripts/export-date-range.js \
     --start="$DATE_START" \
     --end="$DATE_END" \
     --out="$EXPORT_OUT" \

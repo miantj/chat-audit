@@ -70,16 +70,228 @@ async function shouldStopExport({ shutdownRequested, stopFile }) {
   return false;
 }
 
+function emitExportControlEvent(log, event, message) {
+  if (log) {
+    log(JSON.stringify({ event, message }));
+  }
+}
+
+/** 仅扫主表行数，不打开员工弹窗 */
+async function countPlannedEmployees(
+  pageClient,
+  { checkpoint, targetKeywords, maxRows }
+) {
+  let total = 0;
+  let checkpointReached = !checkpoint.employee_name;
+  let processedRowCount = 0;
+  await closeTransientOverlays(pageClient);
+  let mainPager = await getMainPager(pageClient);
+
+  for (let mainPageNo = 1; mainPageNo <= mainPager.totalPages; mainPageNo++) {
+    if (shouldSkipMainPageBeforeCheckpoint(checkpoint, mainPageNo)) {
+      continue;
+    }
+    if (mainPager.currentPage !== mainPageNo) {
+      const changed = await changeMainPage(pageClient, mainPageNo);
+      if (!changed.ok) {
+        break;
+      }
+      await sleep(WAIT_MS);
+      mainPager = await getMainPager(pageClient);
+    }
+    const summaries = await getRowSummaries(pageClient);
+    const rows =
+      targetKeywords.length > 0
+        ? summaries.filter((row) =>
+            targetKeywords.some((keyword) => row.employeeName.includes(keyword))
+          )
+        : summaries;
+
+    for (const row of rows) {
+      if (processedRowCount >= maxRows) {
+        return total;
+      }
+      if (shouldSkipRowBeforeCheckpoint(checkpoint, row.employeeName, checkpointReached)) {
+        continue;
+      }
+      processedRowCount += 1;
+      total += 1;
+      if (!checkpoint.employee_name || row.employeeName === checkpoint.employee_name) {
+        checkpointReached = true;
+      }
+    }
+  }
+  return total;
+}
+
+function conversationWillBeProcessed({
+  checkpoint,
+  row,
+  target,
+  dataset,
+  checkpointReached,
+  isRetryFailedPass,
+  retryFailedConversations
+}) {
+  if (
+    shouldSkipMetricCustomerBeforeCheckpoint(
+      checkpoint,
+      row.employeeName,
+      target.metricCategory,
+      target.metricPage,
+      target.customerId,
+      checkpointReached,
+      EFFECTIVE_METRIC_CATEGORIES
+    )
+  ) {
+    return false;
+  }
+  const conversationId = `${row.employeeName}__customer_${target.customerId}`;
+  if (conversationAlreadyDone(dataset, conversationId)) {
+    return false;
+  }
+  if (
+    isRetryFailedPass &&
+    retryFailedConversations &&
+    !retryFailedConversations.includes(conversationId)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function countProcessableTargets(
+  targets,
+  row,
+  dataset,
+  ctx
+) {
+  let n = 0;
+  for (const target of targets) {
+    if (conversationWillBeProcessed({ ...ctx, row, target, dataset })) {
+      n += 1;
+    }
+  }
+  return n;
+}
+
+function employeeProgressPercent(current, total) {
+  const n = Math.max(0, Number(current) || 0);
+  const t = Number(total);
+  if (t <= 0) return 0;
+  if (n >= t) return 100;
+  return Math.round((n / t) * 100);
+}
+
+const PROGRESS_DEBUG = process.env.CHAT_AUDIT_PROGRESS_DEBUG === '1';
+
+function progressDebug(log, tag, detail) {
+  if (!PROGRESS_DEBUG || !log) return;
+  log(`[progress-debug] ${tag} ${JSON.stringify(detail)}`);
+}
+
+function reportExportStats(
+  log,
+  {
+    current,
+    total,
+    message,
+    reset = false,
+    unit = 'employee',
+    phase = null,
+    debug = null
+  }
+) {
+  if (!log) return;
+  const n = Math.max(0, Number(current) || 0);
+  const t = Number(total);
+  const pct = employeeProgressPercent(n, t);
+  const isRetry = unit === 'conversation' || phase === 'retry-failed';
+  const isResume = phase === 'resume';
+  const defaultMessage = isRetry
+    ? t > 0
+      ? `续传 ${n}/${t}（${pct}%）`
+      : `续传 ${n}`
+    : isResume
+      ? t > 0
+        ? `续传 ${n}/${t}（${pct}%）`
+        : `续传 ${n}`
+      : t > 0
+        ? `员工 ${n}/${t}（${pct}%）`
+        : `员工 ${n}`;
+  const payload = {
+    event: 'export-progress',
+    current: n,
+    total: t > 0 ? t : -1,
+    reset: Boolean(reset),
+    unit: isRetry ? 'conversation' : 'employee',
+    phase: isRetry ? 'retry-failed' : isResume ? 'resume' : phase,
+    message: message || defaultMessage
+  };
+  if (PROGRESS_DEBUG && debug) {
+    payload.debug = debug;
+  }
+  log(JSON.stringify(payload));
+}
+
+/** 同一次暂停只向 UI 发一对 paused/resumed（避免分段 sleep 重复通知） */
+const pauseGate = { uiPaused: false, depth: 0 };
+
+function resetPauseGate() {
+  pauseGate.uiPaused = false;
+  pauseGate.depth = 0;
+}
+
 async function waitWhilePaused({ pauseFile, stopFile, shutdownRequested, log }) {
   if (!pauseFile) {
     return;
   }
-  while (await checkFileExists(pauseFile)) {
-    if (await shouldStopExport({ shutdownRequested, stopFile })) {
-      return;
+  if (!(await checkFileExists(pauseFile))) {
+    return;
+  }
+
+  if (!pauseGate.uiPaused) {
+    pauseGate.uiPaused = true;
+    emitExportControlEvent(log, 'export-paused', '导出已暂停');
+  }
+
+  pauseGate.depth += 1;
+  let lastHeartbeat = 0;
+  const pollMs = 400;
+
+  try {
+    while (await checkFileExists(pauseFile)) {
+      if (await shouldStopExport({ shutdownRequested, stopFile })) {
+        return;
+      }
+      if (Date.now() - lastHeartbeat >= 30000) {
+        log('[pause] 仍在暂停中…');
+        lastHeartbeat = Date.now();
+      }
+      await sleep(pollMs);
     }
-    log(`[pause] 暂停中（检测到 ${pauseFile}），5秒后重试…`);
-    await sleep(5000);
+  } finally {
+    pauseGate.depth = Math.max(0, pauseGate.depth - 1);
+    if (pauseGate.depth === 0 && pauseGate.uiPaused) {
+      pauseGate.uiPaused = false;
+      emitExportControlEvent(log, 'export-resumed', '导出已继续');
+    }
+  }
+}
+
+/** 分段 sleep，便于滚动/等待期间尽快响应暂停 */
+async function sleepWithPauseCheck(ms, { pauseFile, stopFile, shutdownRequested, log }) {
+  if (!pauseFile || ms <= 0) {
+    await sleep(ms);
+    return;
+  }
+  const chunk = 300;
+  let left = ms;
+  while (left > 0) {
+    await waitWhilePaused({ pauseFile, stopFile, shutdownRequested, log });
+    const step = Math.min(chunk, left);
+    await sleep(step);
+    left -= step;
   }
 }
 
@@ -1183,9 +1395,21 @@ async function clickVoiceTranscribeButtons(iframeClient) {
  * Wait for voice transcription to complete: poll until no more "转文字" buttons exist
  * or until max attempts reached.
  */
-async function waitForVoiceTranscriptions(iframeClient, maxAttempts = 10, intervalMs = 1000) {
+async function waitForVoiceTranscriptions(
+  iframeClient,
+  pauseCtx = null,
+  maxAttempts = 10,
+  intervalMs = 1000
+) {
   for (let i = 0; i < maxAttempts; i++) {
-    await sleep(intervalMs);
+    if (pauseCtx) {
+      await waitWhilePaused(pauseCtx);
+    }
+    if (pauseCtx) {
+      await sleepWithPauseCheck(intervalMs, pauseCtx);
+    } else {
+      await sleep(intervalMs);
+    }
     const result = await evalJson(
       iframeClient,
       `(() => {
@@ -1207,23 +1431,29 @@ async function waitForVoiceTranscriptions(iframeClient, maxAttempts = 10, interv
 /**
  * Full voice transcribe pipeline: find + click + wait.
  */
-async function transcribeVoices(iframeClient, log) {
+async function transcribeVoices(iframeClient, log, pauseCtx = null) {
+  if (pauseCtx) {
+    await waitWhilePaused(pauseCtx);
+  }
   const btnCount = await clickVoiceTranscribeButtons(iframeClient);
   if (btnCount > 0) {
     log(`[voice] found ${btnCount} voice messages, transcribing...`);
-    const result = await waitForVoiceTranscriptions(iframeClient);
+    const result = await waitForVoiceTranscriptions(iframeClient, pauseCtx);
     log(`[voice] transcribe ${result.success ? 'done' : 'timeout'} in ${result.attempts} attempts`);
     return btnCount;
   }
   return 0;
 }
 
-async function waitForStableMessages(iframeClient) {
+async function waitForStableMessages(iframeClient, pauseCtx = null) {
   let previousFingerprint = null;
   let lastMessages = [];
   let lastScroll = null;
 
   for (let attempt = 1; attempt <= STABLE_ATTEMPTS; attempt++) {
+    if (pauseCtx) {
+      await waitWhilePaused(pauseCtx);
+    }
     const extracted = await extractIframeMessages(iframeClient);
     lastMessages = extracted.messages || [];
     lastScroll = extracted.scroll || null;
@@ -1245,7 +1475,11 @@ async function waitForStableMessages(iframeClient) {
     previousFingerprint = snapshot.currentFingerprint;
 
     if (attempt < STABLE_ATTEMPTS) {
-      await sleep(STABLE_POLL_MS);
+      if (pauseCtx) {
+        await sleepWithPauseCheck(STABLE_POLL_MS, pauseCtx);
+      } else {
+        await sleep(STABLE_POLL_MS);
+      }
     }
   }
 
@@ -1257,7 +1491,11 @@ async function waitForStableMessages(iframeClient) {
   };
 }
 
-async function waitForDateBoundedMessages(iframeClient, { dateStart, dateEnd, log, paced = false }) {
+async function waitForDateBoundedMessages(
+  iframeClient,
+  { dateStart, dateEnd, log, paced = false, pauseFile, stopFile, shutdownRequested }
+) {
+  const pauseCtx = { pauseFile, stopFile, shutdownRequested, log };
   const seen = new Map();
   let stableAttempts = 0;
   let scrolls = 0;
@@ -1268,8 +1506,23 @@ async function waitForDateBoundedMessages(iframeClient, { dateStart, dateEnd, lo
   let lastSnapshot = { messages: [], scroll: null };
 
   for (scrolls = 0; scrolls <= MAX_MESSAGE_SCROLLS; scrolls++) {
-    await transcribeVoices(iframeClient, log);
-    const stable = await waitForStableMessages(iframeClient);
+    await waitWhilePaused(pauseCtx);
+    if (await shouldStopExport({ shutdownRequested, stopFile })) {
+      const allMessages = Array.from(seen.values());
+      const filtered = filterMessagesByDateRange(allMessages, dateStart, dateEnd);
+      return {
+        ...filtered,
+        attempts: 0,
+        loaded: false,
+        incomplete: true,
+        scrolls,
+        scrollStopReason: 'shutdown',
+        totalObservedMessageCount: allMessages.length,
+        shutdown: true
+      };
+    }
+    await transcribeVoices(iframeClient, log, pauseCtx);
+    const stable = await waitForStableMessages(iframeClient, pauseCtx);
     lastSnapshot = stable;
 
     for (const message of stable.messages || []) {
@@ -1329,15 +1582,16 @@ async function waitForDateBoundedMessages(iframeClient, { dateStart, dateEnd, lo
       `[conversation] scroll ${scrolls + 1}/${MAX_MESSAGE_SCROLLS} moved=${moved.moved} atBottom=${moved.atBottom} observed=${allMessages.length} inRange=${filtered.messages.length}`
     );
     if (paced) {
-      await pacedSleep({
-        enabled: true,
-        minMs: MESSAGE_SCROLL_DELAY_MIN_MS,
-        maxMs: MESSAGE_SCROLL_DELAY_MAX_MS,
-        label: 'after message scroll',
-        log
-      });
+      const scrollDelay = randomInt(
+        MESSAGE_SCROLL_DELAY_MIN_MS,
+        MESSAGE_SCROLL_DELAY_MAX_MS
+      );
+      if (scrollDelay > 0 && log) {
+        log(`[paced] wait ${scrollDelay}ms after message scroll`);
+      }
+      await sleepWithPauseCheck(scrollDelay, pauseCtx);
     } else {
-      await sleep(STABLE_POLL_MS);
+      await sleepWithPauseCheck(STABLE_POLL_MS, pauseCtx);
     }
 
     if (!moved.moved && moved.atBottom && stableAttempts >= MESSAGE_SCROLL_IDLE_LIMIT - 1) {
@@ -1510,10 +1764,32 @@ export async function exportCurrentPage({
   MESSAGE_SCROLL_DELAY_MAX_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MAX_MS || '4000');
 
   const dataset = await loadDataset(outputPath, jsonlPath);
-  const isRetryFailedPass = Array.isArray(retryFailedConversations) && retryFailedConversations.length > 0;
+  let activeRetryList = Array.isArray(retryFailedConversations)
+    ? retryFailedConversations
+    : null;
+  if (
+    (!activeRetryList || activeRetryList.length === 0) &&
+    process.env.CHAT_AUDIT_RETRY_FAILED === '1'
+  ) {
+    activeRetryList = dataset.progress?.failed_conversation_ids ?? [];
+  }
+  const isRetryFailedPass =
+    Array.isArray(activeRetryList) && activeRetryList.length > 0;
+  progressDebug(log, 'export-init', {
+    isRetryFailedPass,
+    retryEnv: process.env.CHAT_AUDIT_RETRY_FAILED === '1',
+    activeRetryCount: activeRetryList?.length ?? 0,
+    paramRetryCount: Array.isArray(retryFailedConversations)
+      ? retryFailedConversations.length
+      : 0,
+    datasetFailedCount:
+      dataset.progress?.failed_conversation_ids?.length ?? 0
+  });
   if (isRetryFailedPass) {
     await saveCheckpoint(checkpointPath, createEmptyCheckpoint());
-    log(`[retry-failed] reset checkpoint; will only process ${retryFailedConversations.length} failed conversation(s)`);
+    log(
+      `[retry-failed] reset checkpoint; will only process ${activeRetryList.length} failed conversation(s)`
+    );
   }
   const loadedCheckpoint = await loadCheckpoint(checkpointPath);
   const checkpoint = isMetricCheckpoint(loadedCheckpoint) ? loadedCheckpoint : { main_page_no: 1, employee_name: null };
@@ -1524,6 +1800,103 @@ export async function exportCurrentPage({
   const pageClient = pageSession.client;
   let checkpointReached = !checkpoint.employee_name;
   let pacedCustomerCount = 0;
+  resetPauseGate();
+  const emptyEmployeeCheckpoint = { main_page_no: 1, employee_name: null };
+  const progressState = {
+    mode: isRetryFailedPass ? 'retry-failed' : 'employees',
+    totalEmployees: 0,
+    completedEmployees: 0,
+    /** 续传前已在 checkpoint 之前完成的员工数 */
+    completedEmployeesBaseline: 0,
+    totalRetryConversations: 0,
+    completedRetryConversations: 0
+  };
+  const touchExportProgress = (options = {}) => {
+    const useRetryBranch =
+      isRetryFailedPass || progressState.mode === 'retry-failed';
+    if (useRetryBranch) {
+      const current = Math.min(
+        progressState.completedRetryConversations,
+        progressState.totalRetryConversations
+      );
+      reportExportStats(log, {
+        current,
+        total: progressState.totalRetryConversations,
+        unit: 'conversation',
+        phase: 'retry-failed',
+        reset: options.reset,
+        debug: {
+          branch: 'retry',
+          mode: progressState.mode,
+          isRetryFailedPass,
+          completedRetry: progressState.completedRetryConversations,
+          totalRetry: progressState.totalRetryConversations,
+          reset: Boolean(options.reset),
+          caller: options.caller || 'touch'
+        }
+      });
+      return;
+    }
+    const current = Math.min(
+      progressState.completedEmployeesBaseline +
+        progressState.completedEmployees,
+      progressState.totalEmployees
+    );
+    reportExportStats(log, {
+      current,
+      total: progressState.totalEmployees,
+      unit: 'employee',
+      phase:
+        progressState.completedEmployeesBaseline > 0 ? 'resume' : null,
+      reset: options.reset,
+      debug: {
+        branch: 'employee',
+        mode: progressState.mode,
+        isRetryFailedPass,
+        current,
+        totalEmployees: progressState.totalEmployees,
+        completedEmployees: progressState.completedEmployees,
+        baseline: progressState.completedEmployeesBaseline,
+        reset: Boolean(options.reset),
+        caller: options.caller || 'touch'
+      }
+    });
+  };
+
+  await closeTransientOverlays(pageClient);
+  if (isRetryFailedPass && activeRetryList) {
+    progressState.totalRetryConversations = activeRetryList.length;
+    progressState.completedRetryConversations = 0;
+    progressState.totalEmployees = 0;
+    progressState.completedEmployees = 0;
+    progressState.completedEmployeesBaseline = 0;
+    log(
+      `[progress] 续传失败会话 total=${progressState.totalRetryConversations} 条`
+    );
+    touchExportProgress({ reset: true, caller: 'retry-init' });
+  } else {
+    progressState.totalEmployees = await countPlannedEmployees(pageClient, {
+      checkpoint: emptyEmployeeCheckpoint,
+      targetKeywords,
+      maxRows
+    });
+    const remainingEmployees = await countPlannedEmployees(pageClient, {
+      checkpoint,
+      targetKeywords,
+      maxRows
+    });
+    progressState.completedEmployeesBaseline = Math.max(
+      0,
+      progressState.totalEmployees - remainingEmployees
+    );
+    log(
+      `[progress] 按员工计进度 total=${progressState.totalEmployees} 人` +
+        (progressState.completedEmployeesBaseline > 0
+          ? `（续传：已完成 ${progressState.completedEmployeesBaseline}，本轮待处理 ${remainingEmployees}）`
+          : '')
+    );
+  }
+  touchExportProgress({ caller: 'after-init' });
   log(
     `[page] using ${pageSession.target.id} focus=${pageSession.state.hasFocus} visible=${pageSession.state.visibilityState} dialog=${pageSession.state.dialogVisible}`
   );
@@ -1582,6 +1955,8 @@ export async function exportCurrentPage({
         }
         processedRowCount += 1;
 
+        let rowCountedForProgress = false;
+        try {
         log(`[row] open ${row.rowIndex} ${row.employeeName}`);
         await closeTransientOverlays(pageClient);
         const dialogReady = await openDialogWithRetry({
@@ -1633,9 +2008,16 @@ export async function exportCurrentPage({
           );
         }
 
-        try {
           const targets = await collectMetricCustomerTargets(pageClient, row.employeeName, log);
-          log(`[row] metric targets ${targets.length}`);
+          const processableTargets = countProcessableTargets(targets, row, dataset, {
+            checkpoint,
+            checkpointReached,
+            isRetryFailedPass,
+            retryFailedConversations: activeRetryList
+          });
+          log(
+            `[row] metric targets ${targets.length} will_process=${processableTargets}`
+          );
           if (dryRunTargets) {
             for (const target of targets) {
               log(
@@ -1644,6 +2026,8 @@ export async function exportCurrentPage({
             }
             continue;
           }
+
+          rowCountedForProgress = true;
 
           for (const target of targets) {
             if (await shouldStopExport({ shutdownRequested, stopFile })) {
@@ -1698,10 +2082,20 @@ export async function exportCurrentPage({
             if (conversationAlreadyDone(dataset, conversationId)) {
               continue;
             }
-            if (isRetryFailedPass && !retryFailedConversations.includes(conversationId)) {
+            if (
+              isRetryFailedPass &&
+              activeRetryList &&
+              !activeRetryList.includes(conversationId)
+            ) {
               continue;
             }
 
+            const isRetryTarget =
+              isRetryFailedPass &&
+              activeRetryList &&
+              activeRetryList.includes(conversationId);
+
+            try {
             log(`[conversation] ${conversationId} metrics=${target.sourceMetricCategories.join(',')}`);
             await assertNoRateLimitForTarget({
               pageClient,
@@ -1827,7 +2221,26 @@ export async function exportCurrentPage({
             try {
               const iframeClient = await getIframeClient(pageSession.target.id);
               try {
-                const extracted = await waitForDateBoundedMessages(iframeClient, { dateStart, dateEnd, log, paced });
+                const extracted = await waitForDateBoundedMessages(iframeClient, {
+                  dateStart,
+                  dateEnd,
+                  log,
+                  paced,
+                  pauseFile,
+                  stopFile,
+                  shutdownRequested
+                });
+                if (extracted.shutdown) {
+                  log(`[stop] 消息滚动期间收到停止，保存状态并退出…`);
+                  await saveDataset(outputPath, dataset);
+                  return {
+                    conversations: dataset.conversations.length,
+                    completed: dataset.progress.completed_conversation_ids.length,
+                    failed: dataset.progress.failed_conversation_ids.length,
+                    outputPath,
+                    shutdown: true
+                  };
+                }
                 log(
                   `[conversation] messages ${extracted.messages.length}/${extracted.totalObservedMessageCount} filtered=${extracted.filteredOutMessageCount} scrolls=${extracted.scrolls} stop=${extracted.scrollStopReason} stable=${extracted.loaded} attempts=${extracted.attempts}`
                 );
@@ -1934,12 +2347,36 @@ export async function exportCurrentPage({
               await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount });
               continue;
             }
+            } finally {
+              if (isRetryTarget) {
+                progressState.completedRetryConversations = Math.min(
+                  progressState.completedRetryConversations + 1,
+                  progressState.totalRetryConversations
+                );
+                touchExportProgress({
+                  caller: 'retry-conversation-done',
+                  conversationId
+                });
+              }
+            }
           }
         } finally {
           if (process.env.CHAT_AUDIT_KEEP_DIALOG_OPEN_ON_ERROR !== '1') {
             await closeRowDialog(pageClient);
           }
           await pacedAfterEmployee({ enabled: paced, log, employeeName: row.employeeName });
+          if (rowCountedForProgress && !isRetryFailedPass) {
+            const remainingThisRun = Math.max(
+              0,
+              progressState.totalEmployees -
+                progressState.completedEmployeesBaseline
+            );
+            progressState.completedEmployees = Math.min(
+              progressState.completedEmployees + 1,
+              remainingThisRun
+            );
+            touchExportProgress({ caller: 'employee-row-done' });
+          }
           await sleep(500);
         }
       }
@@ -1949,10 +2386,48 @@ export async function exportCurrentPage({
     await saveDataset(outputPath, dataset);
   }
 
+  if (progressState.mode === 'retry-failed') {
+    if (progressState.totalRetryConversations > 0) {
+      progressState.completedRetryConversations =
+        progressState.totalRetryConversations;
+      touchExportProgress({ caller: 'retry-finalize' });
+    }
+  } else {
+    const remainingThisRun = Math.max(
+      0,
+      progressState.totalEmployees - progressState.completedEmployeesBaseline
+    );
+    if (progressState.totalEmployees > 0 && remainingThisRun > 0) {
+      progressState.completedEmployees = remainingThisRun;
+      touchExportProgress({ caller: 'employee-finalize' });
+    }
+  }
+
+  const progressUnit =
+    progressState.mode === 'retry-failed' ? 'conversation' : 'employee';
+  const employeeProgressCurrent =
+    progressState.mode === 'retry-failed'
+      ? Math.min(
+          progressState.completedRetryConversations,
+          progressState.totalRetryConversations
+        )
+      : Math.min(
+          progressState.completedEmployeesBaseline +
+            progressState.completedEmployees,
+          progressState.totalEmployees
+        );
+  const employeeProgressTotal =
+    progressState.mode === 'retry-failed'
+      ? progressState.totalRetryConversations
+      : progressState.totalEmployees;
+
   return {
     conversations: dataset.conversations.length,
     completed: dataset.progress.completed_conversation_ids.length,
     failed: dataset.progress.failed_conversation_ids.length,
-    outputPath
+    outputPath,
+    employeeProgressCurrent,
+    employeeProgressTotal,
+    progressUnit
   };
 }

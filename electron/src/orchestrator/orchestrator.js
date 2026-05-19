@@ -4,13 +4,9 @@ import {
   DEFAULT_CDP
 } from '../lib/cdp-probe.js';
 import { prepareCrmPage } from '../lib/preflight-runner.js';
-import { runExportEngine } from '../lib/run-export-engine.js';
-import { getScriptsDir } from '../lib/paths.js';
-import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { runExportEngine, countFailedConversations } from '../lib/run-export-engine.js';
 import fs from 'node:fs/promises';
-
-const PYTHON_CMD = process.platform === 'win32' ? 'python' : 'python3';
 
 export class Orchestrator {
   constructor(options, eventEmitter) {
@@ -45,15 +41,20 @@ export class Orchestrator {
 
     await fs.mkdir(outputDir, { recursive: true });
 
+    const outputPath = path.join(outputDir, `chat-audit-${start}.json`);
+    const failedCount = countFailedConversations(outputPath);
+
     this.ev.emit('progress', {
       current: 0,
       total: 0,
       message:
-        '正在导出（温和加速 paced：等待约为默认一半；若出现「请求过于频繁」请暂停后重试）…'
+        failedCount > 0 && this.options.fullExport !== true
+          ? `正在续传失败会话（${failedCount} 条）…`
+          : '正在导出（温和加速 paced：等待约为默认一半；若出现「请求过于频繁」请暂停后重试）…'
     });
 
     const startTime = Date.now();
-    const { proc, done, outputPath } = runExportEngine(
+    const { proc, done } = runExportEngine(
       { start, end, department, outputDir },
       this.ev
     );
@@ -68,7 +69,10 @@ export class Orchestrator {
         elapsed,
         total: result.conversationCount ?? 0,
         failed: result.failed ?? 0,
-        shutdown: result.shutdown ?? false
+        shutdown: result.shutdown ?? false,
+        employeeProgressCurrent: result.employeeProgressCurrent ?? 0,
+        employeeProgressTotal: result.employeeProgressTotal ?? 0,
+        progressUnit: result.progressUnit ?? 'employee'
       });
     } catch (err) {
       throw err;
@@ -88,22 +92,7 @@ export class Orchestrator {
     /* 由 main 进程写 pause 文件，export-date-range 轮询 */
   }
 
-  async refreshQRForTab(tabIndex) {
-    const scriptsDir = getScriptsDir();
-    const scriptPath = path.join(scriptsDir, 'refresh-wecom-qr.py');
-    return new Promise((resolve, reject) => {
-      const proc = spawn(
-        PYTHON_CMD,
-        [scriptPath, '--tab', String(tabIndex)],
-        { stdio: ['ignore', 'pipe', 'pipe'] }
-      );
-      proc.on('close', (code) =>
-        code === 0 ? resolve() : reject(new Error('QR refresh failed'))
-      );
-    });
-  }
-
   async resumeAll() {
-    this.ev.emit('resumed');
+    /* 继续由删除 pause 文件驱动；export-resumed 事件在脚本退出等待后发出 */
   }
 }

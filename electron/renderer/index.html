@@ -33,7 +33,6 @@
             <input type="checkbox" id="singleDayMode" checked>
             单日导出（开始与结束为同一天）
           </label>
-          <p id="dateSummary" class="date-summary"></p>
         </div>
 
         <div class="form-group">
@@ -61,14 +60,16 @@
       </div>
 
       <div class="status-section">
-        <div id="statusBar" class="status-bar">就绪</div>
-      </div>
-
-      <div class="progress-container">
-        <div class="progress-bar">
-          <div id="progressFill" class="progress-fill"></div>
+        <div class="status-panel" id="statusPanel">
+          <div id="statusBar" class="status-bar-text">就绪</div>
+          <div class="status-progress is-hidden" id="statusProgress">
+            <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressBar">
+              <div id="progressFill" class="progress-fill"></div>
+              <span id="progressPercentLabel" class="progress-percent-label" aria-hidden="true">0%</span>
+            </div>
+            <span id="progressText" class="progress-text">员工 —</span>
+          </div>
         </div>
-        <span id="progressText" class="progress-text">0%</span>
       </div>
 
       <div class="log-section">

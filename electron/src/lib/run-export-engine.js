@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 import { getScriptsDir, getSkillRoot } from './paths.js';
@@ -6,6 +6,31 @@ import { PAUSE_FILE, STOP_FILE } from './signal-files.js';
 import { DEFAULT_CDP } from './cdp-probe.js';
 
 const LARGE_JSON_BYTES = 40 * 1024 * 1024;
+
+export function countFailedConversations(outputPath) {
+  if (!fs.existsSync(outputPath)) {
+    return 0;
+  }
+  const stat = fs.statSync(outputPath);
+  if (stat.size > LARGE_JSON_BYTES) {
+    try {
+      const n = execFileSync(
+        'python3',
+        [
+          '-c',
+          "import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get('progress',{}).get('failed_conversation_ids',[])))",
+          path.resolve(outputPath)
+        ],
+        { encoding: 'utf8' }
+      ).trim();
+      return Number(n) || 0;
+    } catch {
+      return 0;
+    }
+  }
+  const data = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+  return data?.progress?.failed_conversation_ids?.length ?? 0;
+}
 
 function countExportedConversations(outputPath) {
   const jsonlPath = outputPath.replace(/\.json$/i, '.jsonl');
@@ -29,6 +54,25 @@ function countExportedConversations(outputPath) {
   return data?.conversations?.length ?? 0;
 }
 
+function parseExportErrorFromLogs(logText) {
+  const lines = logText.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line.startsWith('{') || !line.includes('"export-error"')) {
+      continue;
+    }
+    try {
+      const ev = JSON.parse(line);
+      if (ev.event === 'export-error' && ev.message) {
+        return String(ev.message);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
 function parseExportSummaryFromLogs(logText) {
   const lines = logText.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -44,7 +88,10 @@ function parseExportSummaryFromLogs(logText) {
       return {
         conversationCount: Number(ev.conversations ?? 0),
         failed: Number(ev.failed ?? 0),
-        shutdown: ev.event === 'export-shutdown' || Boolean(ev.shutdown)
+        shutdown: ev.event === 'export-shutdown' || Boolean(ev.shutdown),
+        employeeProgressCurrent: Number(ev.employeeProgressCurrent ?? 0),
+        employeeProgressTotal: Number(ev.employeeProgressTotal ?? 0),
+        progressUnit: ev.progressUnit === 'conversation' ? 'conversation' : 'employee'
       };
     } catch {
       /* ignore */
@@ -91,6 +138,20 @@ export function runExportEngine(options, eventEmitter) {
     '--skip-date-validation'
   ];
 
+  const failedCount = countFailedConversations(outputPath);
+  const resumeFailedOnly = failedCount > 0 && options.fullExport !== true;
+  if (resumeFailedOnly) {
+    shellArgs.push('--retry-failed');
+    eventEmitter?.emit('progress', {
+      current: 0,
+      total: failedCount,
+      reset: true,
+      unit: 'conversation',
+      phase: 'retry-failed',
+      message: `续传 0/${failedCount}（仅重试失败会话）`
+    });
+  }
+
   // 行缓冲 bash，避免 "========== Export attempt" 等 echo 攒批才到 UI
   const proc = spawn('stdbuf', ['-oL', '-eL', 'bash', ...shellArgs], {
     cwd: skillRoot,
@@ -116,13 +177,58 @@ export function runExportEngine(options, eventEmitter) {
     if (trimmed.startsWith('{')) {
       try {
         const evt = JSON.parse(trimmed);
-        if (evt.event === 'export-progress' && evt.message) {
-          eventEmitter.emit('progress', {
-            current: 0,
-            total: -1,
-            message: evt.message
+        if (evt.event === 'export-paused') {
+          eventEmitter.emit('paused', {
+            message: evt.message || '导出已暂停'
           });
           return;
+        }
+        if (evt.event === 'export-resumed') {
+          eventEmitter.emit('resumed', {
+            message: evt.message || '导出已继续'
+          });
+          return;
+        }
+        if (evt.event === 'export-progress') {
+          if (typeof evt.message === 'string' && evt.message.startsWith('{')) {
+            try {
+              const inner = JSON.parse(evt.message);
+              if (inner.event === 'export-paused') {
+                eventEmitter.emit('paused', {
+                  message: inner.message || '导出已暂停'
+                });
+                return;
+              }
+              if (inner.event === 'export-resumed') {
+                eventEmitter.emit('resumed', {
+                  message: inner.message || '导出已继续'
+                });
+                return;
+              }
+            } catch {
+              /* 非嵌套控制事件 */
+            }
+          }
+          const hasStats =
+            typeof evt.current === 'number' ||
+            (typeof evt.total === 'number' && evt.total > 0);
+          eventEmitter.emit('progress', {
+            current: evt.current ?? 0,
+            total: evt.total ?? -1,
+            message: evt.message,
+            reset: Boolean(evt.reset),
+            unit: evt.unit === 'conversation' ? 'conversation' : 'employee',
+            phase:
+              evt.phase === 'retry-failed'
+                ? 'retry-failed'
+                : evt.phase === 'resume'
+                  ? 'resume'
+                  : null,
+            debug: evt.debug ?? null
+          });
+          if (hasStats || evt.message) {
+            return;
+          }
         }
         if (evt.event === 'export-error' && evt.message) {
           eventEmitter.emit('progress', {
@@ -146,13 +252,36 @@ export function runExportEngine(options, eventEmitter) {
 
     if (
       trimmed.includes('[retry-failed]') ||
-      trimmed.includes('retrying failed list')
+      trimmed.includes('Retry failed conversations') ||
+      trimmed.includes('retrying failed list') ||
+      trimmed.includes('续传失败会话') ||
+      trimmed.includes('补跑失败会话') ||
+      /续传 \d+\/\d+/.test(trimmed) ||
+      /补跑 \d+\/\d+/.test(trimmed)
     ) {
+      const retryTotalMatch = trimmed.match(
+        /Targeting (\d+) previously failed|续传失败会话 total=(\d+)|补跑失败会话 total=(\d+)|Retry failed conversations \((\d+) failed|(\d+) conversation\(s\) still failed|(\d+) conversation\(s\) failed/
+      );
+      const retryTotal = retryTotalMatch
+        ? Number(
+            retryTotalMatch[1] ||
+              retryTotalMatch[2] ||
+              retryTotalMatch[3] ||
+              retryTotalMatch[4] ||
+              retryTotalMatch[5] ||
+              retryTotalMatch[6] ||
+              0
+          )
+        : 0;
       eventEmitter.emit('progress', {
         current: 0,
-        total: -1,
-        message: trimmed
+        total: retryTotal > 0 ? retryTotal : -1,
+        message: trimmed,
+        reset: true,
+        unit: 'conversation',
+        phase: 'retry-failed'
       });
+      return;
     }
 
     if (
@@ -219,11 +348,25 @@ export function runExportEngine(options, eventEmitter) {
           );
           return;
         }
-        resolve({ outputPath, csvPath, code, conversationCount, failed, shutdown });
+        resolve({
+          outputPath,
+          csvPath,
+          code,
+          conversationCount,
+          failed,
+          shutdown,
+          employeeProgressCurrent: summary?.employeeProgressCurrent ?? 0,
+          employeeProgressTotal: summary?.employeeProgressTotal ?? 0,
+          progressUnit: summary?.progressUnit ?? 'employee'
+        });
       } else {
+        const logText = (stderrBuf || stdoutBuf).trim();
+        const exportError = parseExportErrorFromLogs(logText);
         reject(
           new Error(
-            `导出失败 (exit ${code})\n${(stderrBuf || stdoutBuf).trim()}`.slice(0, 1200)
+            exportError
+              ? `导出失败: ${exportError}`
+              : `导出失败 (exit ${code})\n${logText}`.slice(0, 1200)
           )
         );
       }

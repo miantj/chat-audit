@@ -11,6 +11,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onExportProgress: (callback) => {
     ipcRenderer.on('export-progress', (_event, data) => callback(data));
   },
+  onExportPaused: (callback) => {
+    ipcRenderer.on('export-paused', (_event, data) => callback(data));
+  },
+  onExportResumed: (callback) => {
+    ipcRenderer.on('export-resumed', (_event, data) => callback(data));
+  },
   onExportComplete: (callback) => {
     ipcRenderer.on('export-complete', (_event, data) => callback(data));
   },

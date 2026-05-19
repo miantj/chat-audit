@@ -265,7 +265,7 @@ npm install electron electron-builder
 npx electron-builder --win --publish never
 ```
 
-**输出：** `dist/chat-audit-export.exe`
+**输出：** Electron 打包产物（`electron/dist/`，如 macOS DMG / Windows NSIS）
 
 **包含内容：**
 - Node.js 22 + Chromium（Electron 内置）

@@ -52,10 +52,8 @@ function normalizeExportOptions(raw) {
 }
 
 function createWindow() {
-  const isPackaged = app.isPackaged;
-  const preloadPath = isPackaged
-    ? path.join(process.resourcesPath, 'preload.cjs')
-    : path.join(__dirname, 'preload.cjs');
+  // preload 与 main.js 同目录，开发态与 asar 打包后均用 __dirname
+  const preloadPath = path.join(__dirname, 'preload.cjs');
 
   mainWindow = new BrowserWindow({
     width: 900,
@@ -147,10 +145,29 @@ ipcMain.handle('start-export', async (_event, rawOptions) => {
     }
   });
 
-  activeOrchestrator = new Orchestrator(options, emitter);
+  const run = new Orchestrator(options, emitter);
+  activeOrchestrator = run;
 
-  emitter.on('progress', (data) => sendToRenderer('export-progress', data));
+  const isCurrentRun = () => activeOrchestrator === run;
+
+  emitter.on('progress', (data) => {
+    if (!isCurrentRun()) return;
+    if (
+      process.env.CHAT_AUDIT_PROGRESS_DEBUG === '1' &&
+      (data?.debug || String(data?.message || '').includes('[progress-debug]'))
+    ) {
+      log.info('[progress-debug] main→renderer', data);
+    }
+    sendToRenderer('export-progress', data);
+  });
+  emitter.on('paused', (data) => {
+    if (isCurrentRun()) sendToRenderer('export-paused', data);
+  });
+  emitter.on('resumed', (data) => {
+    if (isCurrentRun()) sendToRenderer('export-resumed', data);
+  });
   emitter.on('complete', (data) => {
+    if (!isCurrentRun()) return;
     exportRunning = false;
     activeOrchestrator = null;
     sendToRenderer('export-complete', data);
@@ -164,7 +181,7 @@ ipcMain.handle('start-export', async (_event, rawOptions) => {
     })
     .catch((error) => {
       log.error('start-export error:', error);
-      // 如果还没有通过 error 事件发送，就在这里发
+      if (!isCurrentRun()) return;
       if (!startupError) {
         startupError = error.message;
       }
@@ -206,7 +223,10 @@ ipcMain.handle('resume-export', async () => {
 ipcMain.handle('stop-export', async () => {
   try {
     fs.writeFileSync(STOP_FILE, '');
-    if (activeOrchestrator) activeOrchestrator.stop();
+    if (activeOrchestrator) {
+      activeOrchestrator.stop();
+      activeOrchestrator = null;
+    }
     exportRunning = false;
     return { success: true };
   } catch (error) {

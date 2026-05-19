@@ -125,7 +125,12 @@ const jsonlPath = path.resolve(
     path.join(path.dirname(outputPath), `${path.basename(outputPath, path.extname(outputPath))}.jsonl`)
 );
 
-const targetKeywords = (typeof opts.keywords === 'string' ? opts.keywords : '小米,丽丽,农农,可可')
+// 显式 --keywords= 表示不过滤；未传参时才用 Skill 示例默认（便于 CLI 小样本）
+const targetKeywords = (
+  opts.keywords !== undefined && opts.keywords !== true
+    ? String(opts.keywords)
+    : '小米,丽丽,农农,可可'
+)
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -152,6 +157,9 @@ const expectedActiveTab = (opts.tab || '').trim();
 const skipDateValidation = opts['skip-date-validation'] === true;
 const dryRunTargets = opts['dry-run-targets'] === true;
 const retryFailed = opts['retry-failed'] === true;
+if (retryFailed) {
+  process.env.CHAT_AUDIT_RETRY_FAILED = '1';
+}
 const fastMode = opts.fast === true;
 
 if (fastMode) {
@@ -204,7 +212,18 @@ if (retryFailed) {
       process.stdout.write(
         JSON.stringify({
           event: 'export-progress',
-          message: `[retry-failed] Targeting ${failedIds.length} previously failed conversations`
+          phase: 'retry-failed',
+          unit: 'conversation',
+          reset: true,
+          current: 0,
+          total: failedIds.length,
+          message: `续传 0/${failedIds.length}（0%）`,
+          debug: {
+            source: 'export-date-range',
+            stage: 'retry-start',
+            failedIds: failedIds.length,
+            sampleId: failedIds[0] || null
+          }
         }) + '\n'
       );
     } else {
@@ -270,7 +289,31 @@ try {
     stopFile: STOP_FILE,
     log: (msg) => {
       // 管道/tee 时 console.log 可能块缓冲，用 write 保证 UI 实时日志
-      process.stdout.write(JSON.stringify({ event: 'export-progress', message: msg }) + '\n');
+      const text = String(msg).trim();
+      if (text.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(text);
+          if (
+            parsed.event === 'export-paused' ||
+            parsed.event === 'export-resumed'
+          ) {
+            process.stdout.write(JSON.stringify(parsed) + '\n');
+            return;
+          }
+          if (
+            parsed.event === 'export-progress' &&
+            (parsed.current != null || (parsed.total != null && parsed.total > 0))
+          ) {
+            process.stdout.write(JSON.stringify(parsed) + '\n');
+            return;
+          }
+        } catch {
+          /* 普通日志 */
+        }
+      }
+      process.stdout.write(
+        JSON.stringify({ event: 'export-progress', message: msg }) + '\n'
+      );
     }
   });
 

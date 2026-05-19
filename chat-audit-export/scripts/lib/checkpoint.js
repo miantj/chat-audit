@@ -26,22 +26,32 @@ export function createEmptyCheckpoint() {
 export async function loadCheckpoint(checkpointPath) {
   try {
     const text = await fs.readFile(checkpointPath, 'utf8');
+    if (!text.trim()) {
+      return createEmptyCheckpoint();
+    }
     return JSON.parse(text);
   } catch (error) {
     if (error && error.code === 'ENOENT') {
+      return createEmptyCheckpoint();
+    }
+    if (error instanceof SyntaxError) {
       return createEmptyCheckpoint();
     }
     throw error;
   }
 }
 
+/** 原子写入，避免中断时留下 0 字节 checkpoint */
 export async function saveCheckpoint(checkpointPath, checkpoint) {
   const next = {
     ...createEmptyCheckpoint(),
     ...checkpoint,
     updated_at: new Date().toISOString()
   };
-  await fs.writeFile(checkpointPath, JSON.stringify(next, null, 2), 'utf8');
+  const payload = JSON.stringify(next, null, 2);
+  const tmpPath = `${checkpointPath}.tmp`;
+  await fs.writeFile(tmpPath, payload, 'utf8');
+  await fs.rename(tmpPath, checkpointPath);
 }
 
 export function shouldSkipMainPageBeforeCheckpoint(checkpoint, mainPageNo) {
