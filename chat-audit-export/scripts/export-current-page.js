@@ -944,77 +944,6 @@ function employeeHasRetryTargets(employeeName, retryConversationIds) {
   );
 }
 
-/** 从指标表行打开聊天（绕过外部好友搜索；CRM 短 ID 常不在好友列表文案里） */
-async function openChatFromMetricTableRow(pageClient, target) {
-  const metricCategory =
-    target.metricCategory || target.sourceMetricCategories?.[0];
-  const metricPage = target.metricPage || target.metricRows?.[0]?.metricPage || 1;
-  const customerId = String(target.customerId || '');
-  if (!metricCategory || !customerId) {
-    return { ok: false, reason: 'metric-target-missing' };
-  }
-
-  const clicked = await clickMetricCategory(pageClient, metricCategory);
-  if (!clicked.ok || !clicked.ready) {
-    return { ok: false, reason: 'metric-category-not-ready' };
-  }
-
-  let pager = await getMetricPager(pageClient);
-  let guard = 0;
-  while (pager.currentPage < metricPage && pager.currentPage < pager.totalPages) {
-    const next = await clickMetricNextPage(pageClient);
-    if (!next.ok) {
-      break;
-    }
-    await sleep(WAIT_MS);
-    pager = await getMetricPager(pageClient);
-    guard += 1;
-    if (guard > 20) {
-      break;
-    }
-  }
-
-  const customerIdJson = JSON.stringify(customerId);
-  const result = await evalJson(
-    pageClient,
-    `(() => {
-      const dialog = ${visibleDialogExpr};
-      const table = dialog?.querySelector('.el-table');
-      const vm = table?.__vue__?.$parent;
-      const rows = Array.from(table?.querySelectorAll('.el-table__body-wrapper tbody tr') || []);
-      let rowIndex = -1;
-      for (let i = 0; i < rows.length; i++) {
-        const text = (rows[i].innerText || '').replace(/\\s+/g, ' ');
-        if (text.includes(${customerIdJson})) {
-          rowIndex = i;
-          break;
-        }
-      }
-      if (rowIndex < 0) return { ok: false, reason: 'metric-row-missing' };
-      const rowData = vm?.dataList?.[rowIndex];
-      if (rowData && typeof vm?.goToContent === 'function') {
-        vm.goToContent(rowData);
-        return { ok: true, method: 'goToContent', rowIndex };
-      }
-      const row = rows[rowIndex];
-      const clickTarget =
-        row.querySelector('.text-btn.v-operation') ||
-        Array.from(row.querySelectorAll('*')).find((el) =>
-          /聊天内容/.test((el.textContent || '').trim())
-        );
-      if (clickTarget) {
-        clickTarget.click();
-        return { ok: true, method: 'click', rowIndex };
-      }
-      return { ok: false, reason: 'metric-open-action-missing', rowIndex };
-    })()`
-  );
-  if (result.ok) {
-    await sleep(WAIT_MS);
-  }
-  return result;
-}
-
 async function dispatchEnterKey(pageClient) {
   await pageClient.send('Input.dispatchKeyEvent', {
     type: 'keyDown',
@@ -2203,134 +2132,117 @@ export async function exportCurrentPage({
             });
 
             let friendLabel = target.customerInfo || String(target.customerId);
-            let openedVia = null;
 
-            const metricOpened = await openChatFromMetricTableRow(pageClient, target);
-            if (metricOpened.ok) {
-              openedVia = `metric-row:${metricOpened.method || 'unknown'}`;
-              log(
-                `[conversation] opened customer=${target.customerId} via ${openedVia} category=${target.metricCategory || target.sourceMetricCategories?.[0]}`
-              );
-              await pacedSleep({
-                enabled: paced,
-                minMs: SELECT_FRIEND_DELAY_MIN_MS,
-                maxMs: SELECT_FRIEND_DELAY_MAX_MS,
-                label: `after metric open ${target.customerId}`,
-                log
-              });
-            } else {
-              const switched = await switchToCommunicationExternalFriends(pageClient);
-              if (!switched.ok) {
-                log(`[conversation] skipped customer=${target.customerId} error=switch-to-communication-failed`);
-                if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
-                  dataset.progress.failed_conversation_ids.push(conversationId);
-                }
-                await markConversationCheckpoint({
-                  checkpointPath,
-                  mainPageNo,
-                  employeeName: row.employeeName,
-                  metricCategory: target.metricCategory,
-                  metricPage: target.metricPage,
-                  customerId: target.customerId,
-                  conversationId
-                });
-                await saveDataset(outputPath, dataset);
-                pacedCustomerCount += 1;
-                await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount });
-                continue;
+            const switched = await switchToCommunicationExternalFriends(pageClient);
+            if (!switched.ok) {
+              log(`[conversation] skipped customer=${target.customerId} error=switch-to-communication-failed`);
+              if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                dataset.progress.failed_conversation_ids.push(conversationId);
               }
-
-              const searched = await searchExternalFriendByCustomerId(
-                pageClient,
-                target.customerId,
-                target.customerInfo
-              );
-              await assertNoRateLimitForTarget({
-                pageClient,
-                outputPath,
-                dataset,
+              await markConversationCheckpoint({
                 checkpointPath,
                 mainPageNo,
                 employeeName: row.employeeName,
-                target,
+                metricCategory: target.metricCategory,
+                metricPage: target.metricPage,
+                customerId: target.customerId,
                 conversationId
               });
-              if (!searched.ok) {
-                const sampleHint = searched.sampleItems?.length
-                  ? ` samples=${JSON.stringify(searched.sampleItems)}`
-                  : '';
-                log(
-                  `[conversation] skipped customer=${target.customerId} error=${searched.reason || 'search-failed'} terms=${JSON.stringify(searched.searchTerms || [])}${sampleHint}`
-                );
-                if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
-                  dataset.progress.failed_conversation_ids.push(conversationId);
-                }
-                await markConversationCheckpoint({
-                  checkpointPath,
-                  mainPageNo,
-                  employeeName: row.employeeName,
-                  metricCategory: target.metricCategory,
-                  metricPage: target.metricPage,
-                  customerId: target.customerId,
-                  conversationId
-                });
-                await saveDataset(outputPath, dataset);
-                pacedCustomerCount += 1;
-                await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount });
-                continue;
-              }
-              await pacedSleep({
-                enabled: paced,
-                minMs: SEARCH_RESULT_DELAY_MIN_MS,
-                maxMs: SEARCH_RESULT_DELAY_MAX_MS,
-                label: `after search ${target.customerId}`,
-                log
-              });
-
-              const selected = await selectSearchedFriend(
-                pageClient,
-                target.customerId,
-                searched.match?.friendIndex
-              );
-              await assertNoRateLimitForTarget({
-                pageClient,
-                outputPath,
-                dataset,
-                checkpointPath,
-                mainPageNo,
-                employeeName: row.employeeName,
-                target,
-                conversationId
-              });
-              if (!selected.ok) {
-                log(`[conversation] skipped customer=${target.customerId} error=${selected.reason || 'select-failed'}`);
-                if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
-                  dataset.progress.failed_conversation_ids.push(conversationId);
-                }
-                await markConversationCheckpoint({
-                  checkpointPath,
-                  mainPageNo,
-                  employeeName: row.employeeName,
-                  metricCategory: target.metricCategory,
-                  metricPage: target.metricPage,
-                  customerId: target.customerId,
-                  conversationId
-                });
-                await saveDataset(outputPath, dataset);
-                pacedCustomerCount += 1;
-                await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount });
-                continue;
-              }
-              openedVia = 'external-friend-search';
-              friendLabel = selected.text || friendLabel;
-              await pacedSleep({
-                enabled: paced,
-                minMs: SELECT_FRIEND_DELAY_MIN_MS,
-                maxMs: SELECT_FRIEND_DELAY_MAX_MS,
-                label: `after select ${target.customerId}`,
-                log
-              });
+              await saveDataset(outputPath, dataset);
+              pacedCustomerCount += 1;
+              await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount });
+              continue;
             }
+
+            const searched = await searchExternalFriendByCustomerId(
+              pageClient,
+              target.customerId,
+              target.customerInfo
+            );
+            await assertNoRateLimitForTarget({
+              pageClient,
+              outputPath,
+              dataset,
+              checkpointPath,
+              mainPageNo,
+              employeeName: row.employeeName,
+              target,
+              conversationId
+            });
+            if (!searched.ok) {
+              const sampleHint = searched.sampleItems?.length
+                ? ` samples=${JSON.stringify(searched.sampleItems)}`
+                : '';
+              log(
+                `[conversation] skipped customer=${target.customerId} error=${searched.reason || 'search-failed'} terms=${JSON.stringify(searched.searchTerms || [])}${sampleHint}`
+              );
+              if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                dataset.progress.failed_conversation_ids.push(conversationId);
+              }
+              await markConversationCheckpoint({
+                checkpointPath,
+                mainPageNo,
+                employeeName: row.employeeName,
+                metricCategory: target.metricCategory,
+                metricPage: target.metricPage,
+                customerId: target.customerId,
+                conversationId
+              });
+              await saveDataset(outputPath, dataset);
+              pacedCustomerCount += 1;
+              await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount });
+              continue;
+            }
+            await pacedSleep({
+              enabled: paced,
+              minMs: SEARCH_RESULT_DELAY_MIN_MS,
+              maxMs: SEARCH_RESULT_DELAY_MAX_MS,
+              label: `after search ${target.customerId}`,
+              log
+            });
+
+            const selected = await selectSearchedFriend(
+              pageClient,
+              target.customerId,
+              searched.match?.friendIndex
+            );
+            await assertNoRateLimitForTarget({
+              pageClient,
+              outputPath,
+              dataset,
+              checkpointPath,
+              mainPageNo,
+              employeeName: row.employeeName,
+              target,
+              conversationId
+            });
+            if (!selected.ok) {
+              log(`[conversation] skipped customer=${target.customerId} error=${selected.reason || 'select-failed'}`);
+              if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                dataset.progress.failed_conversation_ids.push(conversationId);
+              }
+              await markConversationCheckpoint({
+                checkpointPath,
+                mainPageNo,
+                employeeName: row.employeeName,
+                metricCategory: target.metricCategory,
+                metricPage: target.metricPage,
+                customerId: target.customerId,
+                conversationId
+              });
+              await saveDataset(outputPath, dataset);
+              pacedCustomerCount += 1;
+              await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount });
+              continue;
+            }
+            friendLabel = selected.text || friendLabel;
+            await pacedSleep({
+              enabled: paced,
+              minMs: SELECT_FRIEND_DELAY_MIN_MS,
+              maxMs: SELECT_FRIEND_DELAY_MAX_MS,
+              label: `after select ${target.customerId}`,
+              log
+            });
 
             try {
               const iframeClient = await getIframeClient(pageSession.target.id);
