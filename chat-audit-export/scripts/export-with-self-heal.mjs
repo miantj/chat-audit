@@ -493,6 +493,17 @@ async function main() {
   }
   let failedRetryCount = readFailedRetryPasses(failedRetryMeta);
 
+  if (cli.retryFailed && failedRetryCount >= FAILED_RETRY_MAX) {
+    log(
+      `[warn] Failed-list retry budget already used (${failedRetryCount}/${FAILED_RETRY_MAX}); finalizing without another export pass.`
+    );
+    if (fs.existsSync(exportOut)) {
+      generateBusinessCsv(exportOut);
+      markDone(exportOut);
+    }
+    process.exit(0);
+  }
+
   const cdpBase = (process.env.CHAT_AUDIT_CRM_CDP_BASE || 'http://localhost:9222').replace(
     /\/$/,
     ''
@@ -528,17 +539,11 @@ async function main() {
       console.error(`ERROR: exceeded max loop iterations (${MAX_LOOP})`);
       process.exit(1);
     }
-    if (retryFailed && failedRetryCount >= FAILED_RETRY_MAX) {
-      console.error(
-        `ERROR: failed-list retry budget exhausted (${failedRetryCount}/${FAILED_RETRY_MAX}).`
-      );
-      process.exit(1);
-    }
-
     if (retryFailed) {
       const n = countFailedConversations(exportOut);
+      const retryPass = failedRetryCount + 1;
       log(
-        `========== Retry failed conversations (${n} failed, pass ${failedRetryCount}/${FAILED_RETRY_MAX}, loop ${attempt}) ==========`
+        `========== Retry failed conversations (${n} failed, pass ${retryPass}/${FAILED_RETRY_MAX}, loop ${attempt}) ==========`
       );
     } else {
       log(
@@ -579,20 +584,28 @@ async function main() {
         process.exit(1);
       }
 
+      if (failedCount > 0) {
+        if (retryFailed) {
+          failedRetryCount += 1;
+          writeFailedRetryPasses(failedRetryMeta, failedRetryCount);
+        }
+        if (failedRetryCount < FAILED_RETRY_MAX) {
+          const nextPass = failedRetryCount + 1;
+          log(
+            `[warn] ${failedCount} conversation(s) failed; scheduling failed-list retry ${nextPass}/${FAILED_RETRY_MAX}...`
+          );
+          retryFailed = true;
+          exportFast = true;
+          continue;
+        }
+        log(
+          `[warn] ${failedCount} conversation(s) still failed after ${FAILED_RETRY_MAX} failed-list retry pass(es); continuing with CSV and completion.`
+        );
+      }
+
       log('');
       log('[OK] Export completed successfully!');
       clearState();
-
-      if (failedCount > 0 && failedRetryCount < FAILED_RETRY_MAX) {
-        failedRetryCount += 1;
-        writeFailedRetryPasses(failedRetryMeta, failedRetryCount);
-        log(
-          `[warn] ${failedCount} conversation(s) failed; scheduling failed-list retry ${failedRetryCount}/${FAILED_RETRY_MAX}...`
-        );
-        retryFailed = true;
-        exportFast = true;
-        continue;
-      }
 
       if (failedCount <= 0) {
         try {

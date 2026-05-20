@@ -1847,6 +1847,7 @@ export async function exportCurrentPage({
     totalRetryConversations: 0,
     completedRetryConversations: 0
   };
+  const attemptedRetryIds = new Set();
   const touchExportProgress = (options = {}) => {
     const useRetryBranch =
       isRetryFailedPass || progressState.mode === 'retry-failed';
@@ -2137,6 +2138,9 @@ export async function exportCurrentPage({
               isRetryFailedPass &&
               activeRetryList &&
               activeRetryList.includes(conversationId);
+            if (isRetryTarget) {
+              attemptedRetryIds.add(conversationId);
+            }
 
             try {
             log(`[conversation] ${conversationId} metrics=${target.sourceMetricCategories.join(',')}`);
@@ -2340,6 +2344,16 @@ export async function exportCurrentPage({
 
                 upsertDatasetConversation(dataset, conversation);
                 await appendJsonlRecord(jsonlPath, conversation);
+                if (isRetryTarget) {
+                  progressState.completedRetryConversations = Math.min(
+                    progressState.completedRetryConversations + 1,
+                    progressState.totalRetryConversations
+                  );
+                  touchExportProgress({
+                    caller: 'retry-conversation-done',
+                    conversationId
+                  });
+                }
                 if (shouldFlushDataset(dataset)) {
                   await saveDataset(outputPath, dataset);
                 }
@@ -2395,16 +2409,7 @@ export async function exportCurrentPage({
               continue;
             }
             } finally {
-              if (isRetryTarget) {
-                progressState.completedRetryConversations = Math.min(
-                  progressState.completedRetryConversations + 1,
-                  progressState.totalRetryConversations
-                );
-                touchExportProgress({
-                  caller: 'retry-conversation-done',
-                  conversationId
-                });
-              }
+              // outer try (2145) — retry progress updated only on successful upsert
             }
           }
         } finally {
@@ -2434,11 +2439,23 @@ export async function exportCurrentPage({
   }
 
   if (progressState.mode === 'retry-failed') {
-    if (progressState.totalRetryConversations > 0) {
-      progressState.completedRetryConversations =
-        progressState.totalRetryConversations;
-      touchExportProgress({ caller: 'retry-finalize' });
+    const stillFailed = (dataset.progress.failed_conversation_ids || []).filter((id) =>
+      activeRetryList?.includes(id)
+    );
+    const notAttempted = (activeRetryList || []).filter(
+      (id) => !attemptedRetryIds.has(id)
+    );
+    if (stillFailed.length > 0) {
+      log(
+        `[retry-failed] ${stillFailed.length} conversation(s) still failed after retry pass: ${stillFailed.join('; ')}`
+      );
     }
+    if (notAttempted.length > 0) {
+      log(
+        `[retry-failed] ${notAttempted.length} conversation(s) not found in metric tables this run (skipped): ${notAttempted.join('; ')}`
+      );
+    }
+    touchExportProgress({ caller: 'retry-finalize' });
   } else {
     const remainingThisRun = Math.max(
       0,
