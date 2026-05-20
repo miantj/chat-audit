@@ -178,7 +178,7 @@ The wrapper script:
 6. Retries up to 2 times for the same error type
 7. Writes lesson notes to `docs/solutions/integration-issues/chat-audit-self-iter-YYYY-MM-DD.md` after 2 failures
 8. For `WXWORK_LOGIN_EXPIRED` (selected customer shows WeCom login), stops immediately without CDP “restart” self-heal.
-9. After a successful pass, if `failed_conversation_ids` is non-empty, automatically runs up to **2** more passes with `--retry-failed --fast` (Electron uses the same wrapper). Pass count is persisted in `chat-audit-YYYY-MM-DD.failed-retry-meta.json` next to the JSON so repeated「开始导出」does not reset the budget. Delete that meta file (or run a full export without `--retry-failed`) to reset. Stops after 2 failed-list retries even if some IDs remain failed.
+9. After a successful pass, if `failed_conversation_ids` is non-empty, automatically runs up to **2** failed-list retries with `--retry-failed --fast` (Electron uses the same wrapper). **Pass 1** uses the same path as the main export (`沟通内容` → `外部好友` search). **Pass 2** uses **metric-table direct** (`goToContent` / 「聊天内容」 on the metric row, with search as fallback). Pass count is persisted in `chat-audit-YYYY-MM-DD.failed-retry-meta.json` next to the JSON so repeated「开始导出」does not reset the budget. Delete that meta file (or run a full export without `--retry-failed`) to reset. Stops after 2 failed-list retries even if some IDs remain failed.
 10. After all passes finish (including failed retries), runs `json-to-csv-business.js` → `chat-audit-YYYY-MM-DD.business.csv` next to the JSON (uses JSONL when JSON > ~30MB).
 
 **Handling enterprise WeChat login expiry (WXWORK_LOGIN_EXPIRED):**

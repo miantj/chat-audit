@@ -1,3 +1,5 @@
+import { pruneFailedConversationIdsForSuccess } from './customer-id.js';
+
 function normalizeText(value) {
   return (value || '').replace(/\r/g, '').trim();
 }
@@ -142,6 +144,12 @@ export function upsertDatasetConversation(dataset, conversation) {
   if (failedIdx >= 0) {
     dataset.progress.failed_conversation_ids.splice(failedIdx, 1);
   }
+  dataset.progress.failed_conversation_ids = pruneFailedConversationIdsForSuccess(
+    dataset.progress.failed_conversation_ids,
+    conversation.employee_name,
+    conversation.customer_id,
+    conversation.source_meta?.source_customer_info || ''
+  );
 
   dataset.dataset_meta.exported_at = new Date().toISOString();
 }

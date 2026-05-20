@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { exportCurrentPage } from './export-current-page.js';
 import { getDefaultCheckpointPath } from './lib/checkpoint.js';
 import { resolveExportOutputPath } from './lib/export-path.js';
+import {
+  applyFailedRetryPassEnv,
+  FAILED_RETRY_MAX,
+  retryPassStrategy
+} from './lib/failed-retry-meta.js';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -153,6 +158,16 @@ const dryRunTargets = opts['dry-run-targets'] === true;
 const retryFailed = opts['retry-failed'] === true;
 if (retryFailed) {
   process.env.CHAT_AUDIT_RETRY_FAILED = '1';
+  if (!process.env.CHAT_AUDIT_RETRY_PASS) {
+    const retryPass = applyFailedRetryPassEnv(outputPath);
+    const strategy = retryPassStrategy(retryPass);
+    process.stdout.write(
+      JSON.stringify({
+        event: 'export-progress',
+        message: `[retry-failed] pass ${retryPass}/${FAILED_RETRY_MAX} strategy=${strategy}`
+      }) + '\n'
+    );
+  }
 }
 const fastMode = opts.fast === true;
 

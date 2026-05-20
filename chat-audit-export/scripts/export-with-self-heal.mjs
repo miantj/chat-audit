@@ -14,6 +14,14 @@ import {
   LARGE_JSON_BYTES
 } from './lib/export-json-stats.js';
 import { ensureCdpReady, isCdpUp } from './lib/cdp-bootstrap.mjs';
+import {
+  buildRetryRunEnv,
+  FAILED_RETRY_MAX,
+  failedRetryMetaPath,
+  readFailedRetryPassesUsed,
+  retryPassStrategy,
+  writeFailedRetryPassesUsed
+} from './lib/failed-retry-meta.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_DIR = __dirname;
@@ -32,7 +40,6 @@ const STATE_FILE = path.join(
 );
 const MAX_LOOP = 25;
 const MAX_RETRIES = 2;
-const FAILED_RETRY_MAX = 2;
 
 function log(line) {
   console.log(line);
@@ -169,24 +176,6 @@ function incrementRetry(errorId) {
   error_counts[errorId] = (Number(error_counts[errorId]) || 0) + 1;
   saveState({ error_counts, last_error_type: last_error });
   return error_counts[errorId];
-}
-
-function readFailedRetryPasses(metaPath) {
-  try {
-    if (!fs.existsSync(metaPath)) return 0;
-    const d = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-    return Number(d.passes_used) || 0;
-  } catch {
-    return 0;
-  }
-}
-
-function writeFailedRetryPasses(metaPath, n) {
-  fs.writeFileSync(
-    metaPath,
-    JSON.stringify({ passes_used: n, updated_at: new Date().toISOString() }),
-    'utf8'
-  );
 }
 
 function parseExportCompleteSummary(output) {
@@ -480,7 +469,7 @@ async function main() {
   fs.mkdirSync(path.dirname(exportOut), { recursive: true });
 
   const expectDept = process.env.CHAT_AUDIT_EXPECT_DEPT || '大客私域顾问-总';
-  const failedRetryMeta = exportOut.replace(/\.json$/i, '.failed-retry-meta.json');
+  const failedRetryMeta = failedRetryMetaPath(exportOut);
   let retryFailed = cli.retryFailed;
   let exportFast = cli.fast;
 
@@ -491,7 +480,7 @@ async function main() {
       /* ignore */
     }
   }
-  let failedRetryCount = readFailedRetryPasses(failedRetryMeta);
+  let failedRetryCount = readFailedRetryPassesUsed(exportOut);
 
   if (cli.retryFailed && failedRetryCount >= FAILED_RETRY_MAX) {
     log(
@@ -554,10 +543,17 @@ async function main() {
     log(`Output: ${exportOut}`);
     log('');
 
+    const retryPass = retryFailed ? failedRetryCount + 1 : 0;
     const runEnv = {
-      ...(retryFailed ? { CHAT_AUDIT_RETRY_FAILED: '1' } : {}),
+      ...(retryFailed ? buildRetryRunEnv(retryPass) : {}),
       ...(cli.fullExport ? { CHAT_AUDIT_CLEAR_METRIC_CHECKPOINT: '1' } : {})
     };
+    if (retryFailed) {
+      const strategy = retryPassStrategy(retryPass);
+      log(
+        `[retry-failed] pass ${retryPass}/${FAILED_RETRY_MAX} strategy=${strategy}${strategy === 'metric-table-direct' ? ' (goToContent, search fallback)' : ''}`
+      );
+    }
     const { code, output } = await runExportDateRange(
       { ...cli, retryFailed, fast: exportFast },
       exportOut,
@@ -587,7 +583,7 @@ async function main() {
       if (failedCount > 0) {
         if (retryFailed) {
           failedRetryCount += 1;
-          writeFailedRetryPasses(failedRetryMeta, failedRetryCount);
+          writeFailedRetryPassesUsed(exportOut, failedRetryCount);
         }
         if (failedRetryCount < FAILED_RETRY_MAX) {
           const nextPass = failedRetryCount + 1;
