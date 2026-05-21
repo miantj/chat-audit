@@ -106,5 +106,32 @@ export async function prepareCrmPage({ startDate, department, onProgress } = {})
   if (startDate) {
     args.push('--expect-date', startDate);
   }
-  await runPreflight(args, { onProgress });
+  try {
+    await runPreflight(args, { onProgress });
+  } catch (err) {
+    if (!String(err?.message || '').includes("invalid choice: 'prepare-export'")) {
+      throw err;
+    }
+    await prepareCrmPageWithLegacyCommands({ startDate, expectDept, onProgress });
+  }
+}
+
+async function prepareCrmPageWithLegacyCommands({ startDate, expectDept, onProgress }) {
+  onProgress?.({ step: 'fallback', message: '预检程序较旧，改用兼容流程准备 CRM 页面...' });
+  await runPreflight(['navigate-audit']);
+  onProgress?.({ step: 'close-dialog', message: '关闭员工弹窗（如有）...' });
+  await runPreflight(['close-dialog']);
+  onProgress?.({ step: 'set-department', message: `设置部门：${expectDept}` });
+  await runPreflight(['set-department', '--group', expectDept]);
+  if (startDate) {
+    onProgress?.({ step: 'set-dates', message: `设置日期：${startDate}` });
+    await runPreflight(['set-dates', '--date', startDate]);
+  }
+  const gateArgs = ['gate-start-export', '--expect-dept', expectDept];
+  if (startDate) {
+    gateArgs.push('--expect-date', startDate);
+  }
+  onProgress?.({ step: 'gate', message: '校验员工列表就绪...' });
+  await runPreflight(gateArgs);
+  onProgress?.({ step: 'ready', message: '预检通过，开始导出' });
 }

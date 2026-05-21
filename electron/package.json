@@ -3,15 +3,15 @@
   "version": "1.0.0",
   "description": "一手聊天审计导出工具",
   "type": "module",
-  "main": "main.js",
+  "main": "main.cjs",
   "scripts": {
     "prestart": "node scripts/ensure-deps.cjs",
     "start": "electron .",
     "rebuild:electron": "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ pnpm rebuild electron",
     "prepare-runtime": "node scripts/prepare-runtime.cjs",
-    "prebuild": "node scripts/prepare-runtime.cjs --win",
+    "prebuild": "node scripts/prepare-runtime.cjs --win-x64",
     "prebuild:mac": "node scripts/prepare-runtime.cjs",
-    "build": "electron-builder --win --x64 --ia32",
+    "build": "electron-builder --win --x64",
     "build:mac": "electron-builder --mac",
     "build:mac:arm64": "electron-builder --mac --arm64",
     "build:mac:x64": "electron-builder --mac --x64",
@@ -57,7 +57,7 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64", "ia32"]
+          "arch": ["x64"]
         }
       ],
       "icon": "build/icon.ico"
@@ -71,8 +71,7 @@
     }
   },
   "pnpm": {
-    "nodeLinker": "hoisted",
-    "onlyBuiltDependencies": ["electron"]
+    "nodeLinker": "hoisted"
   },
   "devDependencies": {
     "electron": "22.3.27",

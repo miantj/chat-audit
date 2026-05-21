@@ -5,7 +5,9 @@
  *
  * 用法：
  *   node scripts/prepare-runtime.cjs           # 当前平台
- *   node scripts/prepare-runtime.cjs --win     # win32 x64/ia32
+ *   node scripts/prepare-runtime.cjs --win     # win32 x64
+ *   node scripts/prepare-runtime.cjs --win-x64 # win32 x64
+ *   node scripts/prepare-runtime.cjs --win-ia32 # win32 ia32
  *   node scripts/prepare-runtime.cjs --all     # darwin/win 常用架构（耗时长）
  *   node scripts/prepare-runtime.cjs --force   # 强制重新下载
  */
@@ -14,6 +16,7 @@ const path = require('node:path');
 const { execFileSync, execSync } = require('node:child_process');
 const https = require('node:https');
 const http = require('node:http');
+const crypto = require('node:crypto');
 
 const NODE_VERSION = '16.20.2';
 const ELECTRON_ROOT = path.join(__dirname, '..');
@@ -28,6 +31,8 @@ const PREFLIGHT_PY = path.join(
 
 const force = process.argv.includes('--force');
 const buildWin = process.argv.includes('--win');
+const buildWinX64 = process.argv.includes('--win-x64');
+const buildWinIa32 = process.argv.includes('--win-ia32');
 const buildAll = process.argv.includes('--all');
 
 const TARGETS = buildAll
@@ -38,10 +43,13 @@ const TARGETS = buildAll
       ['win32', 'ia32']
     ]
   : buildWin
+    ? [['win32', 'x64']]
+    : buildWinX64
     ? [
-        ['win32', 'x64'],
-        ['win32', 'ia32']
+        ['win32', 'x64']
       ]
+    : buildWinIa32
+      ? [['win32', 'ia32']]
     : [[process.platform, process.arch]];
 
 function log(msg) {
@@ -80,17 +88,11 @@ function nodeDist(platform, arch) {
 
 function extractArchive(archivePath, ext) {
   if (ext === 'zip' && process.platform === 'win32') {
+    // -Command 不会把 execFileSync 后续 argv 传给 $args，路径须写进命令字符串。
+    const ps = `Expand-Archive -LiteralPath ${JSON.stringify(archivePath)} -DestinationPath ${JSON.stringify(RUNTIME_ROOT)} -Force`;
     execFileSync(
       'powershell',
-      [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force',
-        archivePath,
-        RUNTIME_ROOT
-      ],
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps],
       { stdio: 'inherit' }
     );
     return;
@@ -131,13 +133,18 @@ async function ensureNode(platform, arch) {
   log(`下载 Node ${NODE_VERSION} ${platform}-${arch}…`);
   await download(url, archivePath);
 
+  const extracted = path.join(RUNTIME_ROOT, folder);
   if (fs.existsSync(destDir)) {
     fs.rmSync(destDir, { recursive: true, force: true });
   }
-  fs.mkdirSync(destDir, { recursive: true });
+  if (fs.existsSync(extracted)) {
+    fs.rmSync(extracted, { recursive: true, force: true });
+  }
 
   extractArchive(archivePath, ext);
-  const extracted = path.join(RUNTIME_ROOT, folder);
+  if (!fs.existsSync(extracted)) {
+    throw new Error(`Node 解压后未找到目录: ${extracted}`);
+  }
   fs.renameSync(extracted, destDir);
 
   fs.unlinkSync(archivePath);
@@ -171,12 +178,25 @@ function pyinstallerCmd() {
   }
 }
 
+function fileSha256(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
+
 function ensurePreflight(platform, arch) {
   const destDir = path.join(RUNTIME_ROOT, `python-${platform}-${arch}`);
   const outName = platform === 'win32' ? 'crm-preflight.exe' : 'crm-preflight';
   const outPath = path.join(destDir, outName);
+  const sourceHashFile = path.join(destDir, '.crm-preflight.sha256');
 
-  if (!force && fs.existsSync(outPath)) {
+  if (!fs.existsSync(PREFLIGHT_PY)) {
+    throw new Error(`找不到 ${PREFLIGHT_PY}`);
+  }
+
+  const sourceHash = fileSha256(PREFLIGHT_PY);
+  const existingHash = fs.existsSync(sourceHashFile)
+    ? fs.readFileSync(sourceHashFile, 'utf8').trim()
+    : null;
+  if (!force && fs.existsSync(outPath) && existingHash === sourceHash) {
     log(`crm-preflight 已存在: ${outPath}`);
     return;
   }
@@ -184,10 +204,6 @@ function ensurePreflight(platform, arch) {
   if (platform !== process.platform || arch !== process.arch) {
     log(`跳过跨平台 PyInstaller（需在 ${platform}-${arch} 机器上构建）: ${outName}`);
     return;
-  }
-
-  if (!fs.existsSync(PREFLIGHT_PY)) {
-    throw new Error(`找不到 ${PREFLIGHT_PY}`);
   }
 
   if (!hasPyInstaller()) {
@@ -221,6 +237,7 @@ function ensurePreflight(platform, arch) {
   if (process.platform !== 'win32') {
     fs.chmodSync(outPath, 0o755);
   }
+  fs.writeFileSync(sourceHashFile, `${sourceHash}\n`);
   fs.rmSync(buildDir, { recursive: true, force: true });
   log(`crm-preflight 就绪: ${outPath}`);
 }
