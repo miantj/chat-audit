@@ -9,9 +9,9 @@
     "start": "electron .",
     "rebuild:electron": "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ pnpm rebuild electron",
     "prepare-runtime": "node scripts/prepare-runtime.cjs",
-    "prebuild": "node scripts/prepare-runtime.cjs",
+    "prebuild": "node scripts/prepare-runtime.cjs --win",
     "prebuild:mac": "node scripts/prepare-runtime.cjs",
-    "build": "electron-builder --win --x64",
+    "build": "electron-builder --win --x64 --ia32",
     "build:mac": "electron-builder --mac",
     "build:mac:arm64": "electron-builder --mac --arm64",
     "build:mac:x64": "electron-builder --mac --x64",
@@ -57,7 +57,7 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": ["x64", "ia32"]
         }
       ],
       "icon": "build/icon.ico"
@@ -71,10 +71,11 @@
     }
   },
   "pnpm": {
-    "nodeLinker": "hoisted"
+    "nodeLinker": "hoisted",
+    "onlyBuiltDependencies": ["electron"]
   },
   "devDependencies": {
-    "electron": "^33.0.0",
+    "electron": "22.3.27",
     "electron-builder": "^25.0.0"
   },
   "dependencies": {

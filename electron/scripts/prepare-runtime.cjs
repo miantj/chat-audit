@@ -5,6 +5,7 @@
  *
  * 用法：
  *   node scripts/prepare-runtime.cjs           # 当前平台
+ *   node scripts/prepare-runtime.cjs --win     # win32 x64/ia32
  *   node scripts/prepare-runtime.cjs --all     # darwin/win 常用架构（耗时长）
  *   node scripts/prepare-runtime.cjs --force   # 强制重新下载
  */
@@ -14,7 +15,7 @@ const { execFileSync, execSync } = require('node:child_process');
 const https = require('node:https');
 const http = require('node:http');
 
-const NODE_VERSION = '22.14.0';
+const NODE_VERSION = '16.20.2';
 const ELECTRON_ROOT = path.join(__dirname, '..');
 const RUNTIME_ROOT = path.join(ELECTRON_ROOT, 'runtime');
 const REPO_ROOT = path.join(ELECTRON_ROOT, '..');
@@ -26,15 +27,22 @@ const PREFLIGHT_PY = path.join(
 );
 
 const force = process.argv.includes('--force');
+const buildWin = process.argv.includes('--win');
 const buildAll = process.argv.includes('--all');
 
 const TARGETS = buildAll
   ? [
       ['darwin', 'arm64'],
       ['darwin', 'x64'],
-      ['win32', 'x64']
+      ['win32', 'x64'],
+      ['win32', 'ia32']
     ]
-  : [[process.platform, process.arch]];
+  : buildWin
+    ? [
+        ['win32', 'x64'],
+        ['win32', 'ia32']
+      ]
+    : [[process.platform, process.arch]];
 
 function log(msg) {
   console.log(`[prepare-runtime] ${msg}`);
@@ -62,8 +70,9 @@ function download(url, dest) {
 
 function nodeDist(platform, arch) {
   const os = platform === 'win32' ? 'win' : platform;
+  const distArch = platform === 'win32' && arch === 'ia32' ? 'x86' : arch;
   const ext = platform === 'win32' ? 'zip' : 'tar.gz';
-  const folder = `node-v${NODE_VERSION}-${os}-${arch}`;
+  const folder = `node-v${NODE_VERSION}-${os}-${distArch}`;
   const file = `${folder}.${ext}`;
   const url = `https://nodejs.org/dist/v${NODE_VERSION}/${file}`;
   return { url, file, folder, ext };
@@ -102,11 +111,15 @@ function extractArchive(archivePath, ext) {
 async function ensureNode(platform, arch) {
   const destName = `node-${platform}-${arch}`;
   const destDir = path.join(RUNTIME_ROOT, destName);
+  const versionFile = path.join(destDir, '.node-version');
   const nodeBin =
     platform === 'win32'
       ? path.join(destDir, 'node.exe')
       : path.join(destDir, 'bin', 'node');
-  if (!force && fs.existsSync(nodeBin)) {
+  const existingVersion = fs.existsSync(versionFile)
+    ? fs.readFileSync(versionFile, 'utf8').trim()
+    : null;
+  if (!force && fs.existsSync(nodeBin) && existingVersion === NODE_VERSION) {
     log(`Node 已存在: ${destName}`);
     return;
   }
@@ -131,6 +144,7 @@ async function ensureNode(platform, arch) {
   if (!fs.existsSync(nodeBin)) {
     throw new Error(`Node 解压后未找到: ${nodeBin}`);
   }
+  fs.writeFileSync(versionFile, `${NODE_VERSION}\n`);
   log(`Node 就绪: ${nodeBin}`);
 }
 
@@ -219,8 +233,8 @@ async function main() {
     if (platform === 'darwin' && arch === 'ia32') {
       continue;
     }
-    if (platform === 'win32' && arch !== 'x64') {
-      log(`跳过 win32-${arch}（仅支持 x64）`);
+    if (platform === 'win32' && !['x64', 'ia32'].includes(arch)) {
+      log(`跳过 win32-${arch}（仅支持 x64/ia32）`);
       continue;
     }
     await ensureNode(platform, arch);
