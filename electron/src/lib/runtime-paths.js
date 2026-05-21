@@ -26,8 +26,11 @@ export function getBundledNodeBin() {
   if (!app?.isPackaged) {
     return 'node';
   }
-  const bin = process.platform === 'win32' ? 'node.exe' : 'node';
-  const p = path.join(packagedRuntimeDir(`node-${runtimeKey()}`, 'bin', bin));
+  const runtimeDir = packagedRuntimeDir(`node-${runtimeKey()}`);
+  const p =
+    process.platform === 'win32'
+      ? path.join(runtimeDir, 'node.exe')
+      : path.join(runtimeDir, 'bin', 'node');
   return fs.existsSync(p) ? p : 'node';
 }
 

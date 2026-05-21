@@ -10,7 +10,7 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
-const { execSync } = require('node:child_process');
+const { execFileSync, execSync } = require('node:child_process');
 const https = require('node:https');
 const http = require('node:http');
 
@@ -61,12 +61,42 @@ function download(url, dest) {
 }
 
 function nodeDist(platform, arch) {
-  const os = platform === 'darwin' ? 'darwin' : 'win32';
-  const ext = platform === 'win32' ? 'zip' : 'tar.xz';
+  const os = platform === 'win32' ? 'win' : platform;
+  const ext = platform === 'win32' ? 'zip' : 'tar.gz';
   const folder = `node-v${NODE_VERSION}-${os}-${arch}`;
   const file = `${folder}.${ext}`;
   const url = `https://nodejs.org/dist/v${NODE_VERSION}/${file}`;
   return { url, file, folder, ext };
+}
+
+function extractArchive(archivePath, ext) {
+  if (ext === 'zip' && process.platform === 'win32') {
+    execFileSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force',
+        archivePath,
+        RUNTIME_ROOT
+      ],
+      { stdio: 'inherit' }
+    );
+    return;
+  }
+
+  if (ext === 'zip') {
+    execFileSync('unzip', ['-q', '-o', archivePath, '-d', RUNTIME_ROOT], {
+      stdio: 'inherit'
+    });
+    return;
+  }
+
+  execFileSync('tar', ['-xzf', archivePath, '-C', RUNTIME_ROOT], {
+    stdio: 'inherit'
+  });
 }
 
 async function ensureNode(platform, arch) {
@@ -74,7 +104,7 @@ async function ensureNode(platform, arch) {
   const destDir = path.join(RUNTIME_ROOT, destName);
   const nodeBin =
     platform === 'win32'
-      ? path.join(destDir, 'bin', 'node.exe')
+      ? path.join(destDir, 'node.exe')
       : path.join(destDir, 'bin', 'node');
   if (!force && fs.existsSync(nodeBin)) {
     log(`Node 已存在: ${destName}`);
@@ -93,20 +123,9 @@ async function ensureNode(platform, arch) {
   }
   fs.mkdirSync(destDir, { recursive: true });
 
-  if (ext === 'zip') {
-    execSync(
-      `unzip -q -o "${archivePath}" -d "${RUNTIME_ROOT}"`,
-      { stdio: 'inherit' }
-    );
-    const extracted = path.join(RUNTIME_ROOT, folder);
-    fs.renameSync(extracted, destDir);
-  } else {
-    execSync(`tar -xJf "${archivePath}" -C "${RUNTIME_ROOT}"`, {
-      stdio: 'inherit'
-    });
-    const extracted = path.join(RUNTIME_ROOT, folder);
-    fs.renameSync(extracted, destDir);
-  }
+  extractArchive(archivePath, ext);
+  const extracted = path.join(RUNTIME_ROOT, folder);
+  fs.renameSync(extracted, destDir);
 
   fs.unlinkSync(archivePath);
   if (!fs.existsSync(nodeBin)) {
