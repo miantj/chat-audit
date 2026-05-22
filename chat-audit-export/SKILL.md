@@ -43,6 +43,7 @@ metadata:
 |--------|------|
 | `scripts/crm-preflight.py` | CDP: login, dates, department, **diagnose-state**, **gate-start-export**, **gate-check**, **gate-wecom** (subcommands) |
 | `scripts/lib/cdp-bootstrap.mjs` | CDP URL probe + cold-start Chrome (no pkill); used by `export-with-self-heal.mjs` |
+| `scripts/start-export.mjs` | **一键导出**（等同 Electron「开始导出」：CDP → `prepare-export` → `export-with-self-heal`） |
 | `scripts/export-date-range.js` | Bulk export for `--start` / `--end` (`--retry-failed`, `--fast`) |
 | `scripts/reconcile.js` | JSONL → deduped dataset JSON |
 | `scripts/json-to-csv-business.js` | Business CSV + `transcript` column |
@@ -73,6 +74,26 @@ Work from a writable task/project workspace, not from the skill install director
 ```bash
 cd /path/to/chat-audit-export
 ```
+
+### 一键导出（CLI，等同 Electron「开始导出」）
+
+专用 Chrome（`~/.chrome-chat-audit-profile`，CDP `9222`）中已登录 CRM 后：
+
+```bash
+# 在 skill 目录内（默认导出昨天 → 上级工作区 ../exports/chat-audit-YYYY-MM-DD.json）
+node scripts/start-export.mjs
+
+# 或从 monorepo 根目录
+pnpm export
+
+# 指定日期与输出目录
+node scripts/start-export.mjs --start=2026-05-21 --output-dir=/path/to/exports
+
+# 可执行入口（需 chmod +x bin/chat-audit-export）
+./bin/chat-audit-export --help
+```
+
+流程：`ensureCdpReady` → `prepare-export`（部门/日期/门禁）→ `export-with-self-heal.mjs`（自愈、失败补跑、`.business.csv`）。默认日期为**昨天**（本地时区），与桌面端一致。
 
 If the skill is installed elsewhere, invoke the installed scripts by absolute path from the task workspace, or set `CHAT_AUDIT_EXPORT_DIR` / pass `--out` to a workspace-owned directory. The scripts refuse to write output inside a detected skill directory.
 
