@@ -1,9 +1,20 @@
 import electron from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { EventEmitter } from 'node:events';
-import log from 'electron-log';
+
+// 打包后 main.mjs 在 app.asar.unpacked，ESM 无法解析 asar 内 node_modules；用 require 从 app.asar 根加载
+function createAppRequire() {
+  const asarPkg = path.join(process.resourcesPath, 'app.asar', 'package.json');
+  if (fs.existsSync(asarPkg)) {
+    return createRequire(pathToFileURL(asarPkg));
+  }
+  return createRequire(import.meta.url);
+}
+
+const log = createAppRequire()('electron-log');
 import { Orchestrator } from './src/orchestrator/orchestrator.js';
 import { loadSettings, saveSettings } from './src/lib/settings.js';
 import {

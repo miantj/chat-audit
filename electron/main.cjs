@@ -18,16 +18,16 @@ function writeBootstrapLog(payload) {
 }
 
 function resolveMainEntry() {
-  // 优先从 app.asar 加载：node_modules（electron-log 等）在 asar 内，unpacked 入口解析不到
-  const asarMain = path.join(process.resourcesPath, 'app.asar', 'main.mjs');
+  // 动态 import() 无法加载 app.asar 内文件；入口必须在 app.asar.unpacked（真实路径）
+  const unpackedMain = path.join(process.resourcesPath, 'app.asar.unpacked', 'main.mjs');
   const devMain = path.join(__dirname, 'main.mjs');
-  const candidates = [asarMain, devMain];
+  const candidates = [unpackedMain, devMain];
   const probe = candidates.map((candidate) => `${candidate} => ${fs.existsSync(candidate)}`);
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
       writeBootstrapLog(
         [
-          'resolveMainEntry ok (bootstrap v3: asar-first)',
+          'resolveMainEntry ok (bootstrap v4: unpacked-first)',
           `execPath=${process.execPath}`,
           `resourcesPath=${process.resourcesPath}`,
           `cwd=${process.cwd()}`,
@@ -40,7 +40,7 @@ function resolveMainEntry() {
   }
   writeBootstrapLog(
     [
-      'resolveMainEntry FAILED (bootstrap v3)',
+      'resolveMainEntry FAILED (bootstrap v4)',
       `execPath=${process.execPath}`,
       `resourcesPath=${process.resourcesPath}`,
       `__dirname=${__dirname}`,

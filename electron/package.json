@@ -35,6 +35,7 @@
     ],
     "asarUnpack": [
       "package.json",
+      "main.mjs",
       "preload.cjs",
       "src/**",
       "renderer/**"

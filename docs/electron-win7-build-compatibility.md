@@ -145,7 +145,8 @@ SyntaxError: Cannot use import statement outside a module
 
 - `package.json` → `build.files` 显式包含 `main.mjs`、`src/**/*`、`renderer/**/*`、`preload.cjs`
 - `build.asarUnpack` 包含 **`package.json`**、`main.mjs`、`src/**`、`renderer/**`（`package.json` 供 `src/**/*.js` 作 ESM 解析）
-- `main.cjs` 优先 `import()` **`app.asar/main.mjs`**（`node_modules` 在 asar 内；勿从 `app.asar.unpacked` 加载入口，否则 `Cannot find package 'electron-log'`）
+- `main.cjs` 从 **`app.asar.unpacked/main.mjs`** 动态 import（asar 内文件无法 dynamic import）
+- `main.mjs` 用 **`createRequire(app.asar/package.json)`** 加载 `electron-log`（unpacked 入口解析不到 asar 内 `node_modules`）
 
 修改后重新打包：
 
