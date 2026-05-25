@@ -17,6 +17,7 @@
 | 目录 | 说明 |
 |------|------|
 | `electron/` | 桌面 GUI（主入口） |
+| `electron/docs/` | Electron 打包与兼容性备忘 |
 | `chat-audit-export/` | 导出引擎与 Skill 文档（`SKILL.md`） |
 
 ## 使用方法（最终用户）

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-/** 与 electron/src/lib/run-export-engine.js 保持一致 */
+/** Electron / CLI 共用（run-export-engine 动态 import 本模块） */
 export const LARGE_JSON_BYTES = 40 * 1024 * 1024;
 
 /**

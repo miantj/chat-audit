@@ -5,20 +5,23 @@ import fs from 'node:fs';
 import { getScriptsDir, getSkillRoot } from './paths.js';
 import { PAUSE_FILE, STOP_FILE } from './signal-files.js';
 import { DEFAULT_CDP } from './cdp-probe.js';
-import {
-  FAILED_RETRY_MAX,
-  readFailedRetryPassesUsed
-} from './failed-retry-meta.js';
 import { getBundledNodeBin, runtimeExportEnv } from './runtime-paths.js';
 
+const scriptsLibDir = path.join(getScriptsDir(), 'lib');
 const exportJsonStats = await import(
-  pathToFileURL(
-    path.join(getScriptsDir(), 'lib', 'export-json-stats.js')
-  ).href
+  pathToFileURL(path.join(scriptsLibDir, 'export-json-stats.js')).href
+);
+const failedRetryMeta = await import(
+  pathToFileURL(path.join(scriptsLibDir, 'failed-retry-meta.js')).href
+);
+const moderatePacedEnv = await import(
+  pathToFileURL(path.join(scriptsLibDir, 'moderate-paced-env.js')).href
 );
 
 const { countFailedConversations: countFailedFromLib, LARGE_JSON_BYTES } =
   exportJsonStats;
+const { FAILED_RETRY_MAX, readFailedRetryPassesUsed } = failedRetryMeta;
+const { MODERATE_PACED_ENV } = moderatePacedEnv;
 
 export function countFailedConversations(outputPath) {
   return countFailedFromLib(outputPath, getBundledNodeBin());
@@ -91,19 +94,6 @@ function parseExportSummaryFromLogs(logText) {
   }
   return null;
 }
-
-/** 温和加速：仍启用 paced；搜索/选中/滚动由 export-current-page DOM 就绪等待 */
-export const MODERATE_PACED_ENV = {
-  CUSTOMER_DELAY_MIN_MS: '400',
-  CUSTOMER_DELAY_MAX_MS: '800',
-  BATCH_REST_MS: '2000',
-  EMPLOYEE_DELAY_MIN_MS: '1000',
-  EMPLOYEE_DELAY_MAX_MS: '2000',
-  DOM_POLL_INTERVAL_MS: '150',
-  DOM_SEARCH_READY_TIMEOUT_MS: '4000',
-  DOM_SELECT_READY_TIMEOUT_MS: '5000',
-  DOM_MESSAGE_CHANGE_TIMEOUT_MS: '1200'
-};
 
 /**
  * 与 SKILL.md Step 4 一致：export-with-self-heal（CDP、gate-start、重试自愈、export-date-range）。
