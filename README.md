@@ -8,9 +8,9 @@
 - **Google Chrome**（推荐；应用会启动专用配置目录，需用户本机已安装 Chrome）
 - **Windows / macOS**：导出由 Node 脚本 `export-with-self-heal.mjs` 执行，无需 Git 或 bash
 
-**开发模式**（`pnpm start`）仍使用本机 **Node.js 22+** 与 **Python 3.10+**（`pip install -r chat-audit-export/scripts/requirements-preflight.txt`）。
+**开发模式**（`pnpm start`）仍使用本机 **Node.js 20** 与 **Python 3.8+**（`pip install -r chat-audit-export/scripts/requirements-preflight.txt`）。
 
-**安装包（方案 A）** 已内嵌 **Node 22** 与 **crm-preflight**（PyInstaller），一般**无需**用户再装 Node/Python。
+**安装包（方案 A）** 已内嵌 **Node 20** 与 **crm-preflight**（PyInstaller），一般**无需**用户再装 Node/Python。
 
 ## 项目结构
 
@@ -94,6 +94,6 @@ pnpm run build       # Windows NSIS（须在 Windows 上执行）
 | 组件 | 说明 |
 |------|------|
 | Chrome | 远程调试默认 `http://127.0.0.1:9222`；应用会启动专用配置目录 |
-| 内嵌 Node 22 | 安装包内 `resources/runtime/node-*`；开发态用系统 `node` |
+| 内嵌 Node 20 | 安装包内 `resources/runtime/node-*`；开发态用系统 `node` |
 | 内嵌 crm-preflight | 安装包内 PyInstaller 产物；开发态用系统 `python3` + `.py` |
 | refresh-wecom-qr | 仍依赖系统 Python（仅手动排障时用） |

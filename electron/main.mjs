@@ -53,7 +53,7 @@ function normalizeExportOptions(raw) {
 }
 
 function createWindow() {
-  // preload 与 main.js 同目录，开发态与 asar 打包后均用 __dirname
+  // preload 与 main.mjs 同目录，开发态与 app.asar.unpacked 打包后均用 __dirname
   const preloadPath = path.join(__dirname, 'preload.cjs');
 
   mainWindow = new BrowserWindow({

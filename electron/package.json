@@ -22,10 +22,22 @@
     "productName": "一手聊天审计导出",
     "electronDist": "node_modules/electron/dist",
     "files": [
-      "**/*",
+      "main.cjs",
+      "main.mjs",
+      "preload.cjs",
+      "renderer/**/*",
+      "src/**/*",
+      "package.json",
       "!runtime/**",
       "!dist/**",
+      "!scripts/**",
       "!build-log.txt"
+    ],
+    "asarUnpack": [
+      "package.json",
+      "preload.cjs",
+      "src/**",
+      "renderer/**"
     ],
     "extraResources": [
       {
@@ -67,7 +79,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "一手聊天审计导出"
+      "shortcutName": "ChatAuditExport",
+      "uninstallDisplayName": "ChatAuditExport"
     }
   },
   "pnpm": {
