@@ -31,6 +31,7 @@ import {
   createEmptyDataset,
   upsertDatasetConversation
 } from './lib/dataset.js';
+import { getDomPaceConfig } from './lib/dom-pace-config.js';
 
 let WAIT_MS = 1200;
 let STABLE_POLL_MS = 1200;
@@ -43,12 +44,6 @@ let EMPLOYEE_DELAY_MIN_MS = Number(process.env.EMPLOYEE_DELAY_MIN_MS || '5000');
 let EMPLOYEE_DELAY_MAX_MS = Number(process.env.EMPLOYEE_DELAY_MAX_MS || '5000');
 const CUSTOMERS_PER_BATCH = Number(process.env.CUSTOMERS_PER_BATCH || '10');
 let BATCH_REST_MS = Number(process.env.BATCH_REST_MS || '5000');
-let SEARCH_RESULT_DELAY_MIN_MS = Number(process.env.SEARCH_RESULT_DELAY_MIN_MS || '1500');
-let SEARCH_RESULT_DELAY_MAX_MS = Number(process.env.SEARCH_RESULT_DELAY_MAX_MS || '4000');
-let SELECT_FRIEND_DELAY_MIN_MS = Number(process.env.SELECT_FRIEND_DELAY_MIN_MS || '2000');
-let SELECT_FRIEND_DELAY_MAX_MS = Number(process.env.SELECT_FRIEND_DELAY_MAX_MS || '5000');
-let MESSAGE_SCROLL_DELAY_MIN_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MIN_MS || '1500');
-let MESSAGE_SCROLL_DELAY_MAX_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MAX_MS || '4000');
 const SAVE_EVERY = 10;
 const EFFECTIVE_METRIC_CATEGORIES = [
   '总有效跟进好友数（人天）',
@@ -335,6 +330,204 @@ async function pacedSleep({ enabled, minMs, maxMs, label, log }) {
   }
   await sleep(ms);
   return ms;
+}
+
+function customerIdMatchers(customerId, customerInfo = '') {
+  return [...new Set([String(customerId || ''), ...extractAllCustomerIds(customerInfo)].filter(Boolean))];
+}
+
+/** 轮询好友搜索结果直至目标 ID 出现且 loading 结束 */
+async function waitForFriendSearchReady(
+  pageClient,
+  customerId,
+  customerInfo = '',
+  { timeoutMs = 4000, intervalMs = 150, log } = {}
+) {
+  const ids = customerIdMatchers(customerId, customerInfo);
+  const idsJson = JSON.stringify(ids);
+  const startedAt = Date.now();
+  let lastState = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    lastState = await evalJson(
+      pageClient,
+      `(() => {
+        const dialog = ${visibleDialogExpr};
+        const loading = !!dialog?.querySelector('.el-loading-mask:not([style*="display: none"])');
+        const items = Array.from(dialog?.querySelectorAll('.friend-li') || []).map((el) => ({
+          text: (el.innerText || el.textContent || '').replace(/\\n+/g, ' | ').trim(),
+          active: el.classList.contains('friend-li-active')
+        }));
+        const ids = ${idsJson};
+        return {
+          loading,
+          itemCount: items.length,
+          targetFound: items.some((item) => ids.some((id) => item.text.includes(id))),
+          signature: items.map((item) => item.text).join('||').slice(0, 1000)
+        };
+      })()`
+    );
+    if (lastState?.targetFound && !lastState.loading) {
+      const ms = Date.now() - startedAt;
+      if (log) {
+        log(`[dom-wait] search ready customer=${customerId} wait=${ms}ms items=${lastState.itemCount}`);
+      }
+      return { ok: true, waitMs: ms, state: lastState };
+    }
+    await sleep(intervalMs);
+  }
+  const ms = Date.now() - startedAt;
+  if (log) {
+    log(`[dom-wait] search ready timeout customer=${customerId} wait=${ms}ms`);
+  }
+  return { ok: false, waitMs: ms, state: lastState };
+}
+
+/** 轮询好友选中 + 企微消息 iframe 就绪 */
+async function waitForSelectedFriendReady(
+  pageClient,
+  parentPageId,
+  customerId,
+  customerInfo = '',
+  { timeoutMs = 5000, intervalMs = 150, log } = {}
+) {
+  const ids = customerIdMatchers(customerId, customerInfo);
+  const idsJson = JSON.stringify(ids);
+  const startedAt = Date.now();
+  let lastState = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    const [pageState, targets] = await Promise.all([
+      evalJson(
+        pageClient,
+        `(() => {
+          const dialog = ${visibleDialogExpr};
+          const active = dialog?.querySelector('.friend-li.friend-li-active');
+          const activeText = (active?.innerText || active?.textContent || '').replace(/\\n+/g, ' | ').trim();
+          const loading = !!dialog?.querySelector('.el-loading-mask:not([style*="display: none"])');
+          const ids = ${idsJson};
+          return {
+            loading,
+            activeText,
+            activeMatches: ids.some((id) => activeText.includes(id))
+          };
+        })()`
+      ),
+      getTargets().catch(() => [])
+    ]);
+    const hasMessageIframe = targets.some(
+      (item) =>
+        item.type === 'iframe' &&
+        item.parentId === parentPageId &&
+        item.url.includes('ww-open-data-frame')
+    );
+    lastState = { ...pageState, hasMessageIframe };
+    if (lastState.activeMatches && hasMessageIframe && !lastState.loading) {
+      const ms = Date.now() - startedAt;
+      if (log) {
+        log(
+          `[dom-wait] selected ready customer=${customerId} wait=${ms}ms iframe=true`
+        );
+      }
+      return { ok: true, waitMs: ms, state: lastState };
+    }
+    await sleep(intervalMs);
+  }
+  const ms = Date.now() - startedAt;
+  if (log) {
+    log(`[dom-wait] selected ready timeout customer=${customerId} wait=${ms}ms`);
+  }
+  return { ok: false, waitMs: ms, state: lastState };
+}
+
+/** 指标表 goToContent 直开：只等企微消息 iframe，不依赖好友列表高亮 */
+async function waitForMessageIframeReady(
+  parentPageId,
+  { timeoutMs = 5000, intervalMs = 150, log } = {}
+) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const targets = await getTargets().catch(() => []);
+    const hasMessageIframe = targets.some(
+      (item) =>
+        item.type === 'iframe' &&
+        item.parentId === parentPageId &&
+        item.url.includes('ww-open-data-frame')
+    );
+    if (hasMessageIframe) {
+      const ms = Date.now() - startedAt;
+      if (log) {
+        log(`[dom-wait] message iframe ready wait=${ms}ms`);
+      }
+      return { ok: true, waitMs: ms };
+    }
+    await sleep(intervalMs);
+  }
+  const ms = Date.now() - startedAt;
+  if (log) {
+    log(`[dom-wait] message iframe timeout wait=${ms}ms`);
+  }
+  return { ok: false, waitMs: ms };
+}
+
+async function getMessageDomState(iframeClient) {
+  const extracted = await extractIframeMessages(iframeClient);
+  const messages = extracted.messages || [];
+  const lastMessage = messages[messages.length - 1] || {};
+  return {
+    messageCount: messages.length,
+    lastMessageKey: buildRawMessageKey(lastMessage),
+    scrollTop: extracted.scroll?.top || 0,
+    scrollHeight: extracted.scroll?.height || 0,
+    clientHeight: extracted.scroll?.clientHeight || 0,
+    atBottom: !!extracted.scroll?.atBottom
+  };
+}
+
+function hasMessageDomChanged(beforeState, afterState) {
+  if (!beforeState || !afterState) return true;
+  return (
+    beforeState.messageCount !== afterState.messageCount ||
+    beforeState.lastMessageKey !== afterState.lastMessageKey ||
+    beforeState.scrollTop !== afterState.scrollTop ||
+    beforeState.scrollHeight !== afterState.scrollHeight
+  );
+}
+
+/** 消息区滚动后轮询 DOM 变化（替代固定 scroll sleep） */
+async function waitForMessageDomChange(
+  iframeClient,
+  beforeState,
+  { timeoutMs = 1200, intervalMs = 150, log, pauseCtx = null } = {}
+) {
+  const startedAt = Date.now();
+  let lastState = beforeState;
+  while (Date.now() - startedAt < timeoutMs) {
+    if (pauseCtx) {
+      await waitWhilePaused(pauseCtx);
+      if (await shouldStopExport(pauseCtx)) {
+        return { changed: false, waitMs: Date.now() - startedAt, state: lastState, stopped: true };
+      }
+    }
+    lastState = await getMessageDomState(iframeClient);
+    if (hasMessageDomChanged(beforeState, lastState)) {
+      const ms = Date.now() - startedAt;
+      if (log) {
+        log(`[dom-wait] message dom changed wait=${ms}ms count=${lastState.messageCount}`);
+      }
+      return { changed: true, waitMs: ms, state: lastState };
+    }
+    if (pauseCtx) {
+      await sleepWithPauseCheck(intervalMs, pauseCtx);
+    } else {
+      await sleep(intervalMs);
+    }
+  }
+  const ms = Date.now() - startedAt;
+  if (log) {
+    log(
+      `[dom-wait] message dom unchanged timeout wait=${ms}ms count=${lastState?.messageCount || 0}`
+    );
+  }
+  return { changed: false, waitMs: ms, state: lastState };
 }
 
 async function loadDataset(filePath, jsonlPath) {
@@ -936,7 +1129,7 @@ async function switchToCommunicationExternalFriends(pageClient) {
 }
 
 /** 指标表行直达聊天（goToContent / 「聊天内容」），用于补跑第 2 轮 */
-async function openChatFromMetricTableRow(pageClient, target) {
+async function openChatFromMetricTableRow(pageClient, target, { postOpenSleep = true } = {}) {
   const metricCategory =
     target.metricCategory || target.sourceMetricCategories?.[0];
   const metricPage = target.metricPage || target.metricRows?.[0]?.metricPage || 1;
@@ -1009,7 +1202,7 @@ async function openChatFromMetricTableRow(pageClient, target) {
       return { ok: false, reason: 'metric-open-action-missing', rowIndex };
     })()`
   );
-  if (result.ok) {
+  if (result.ok && postOpenSleep) {
     await sleep(WAIT_MS);
   }
   return result;
@@ -1172,7 +1365,12 @@ async function fillFriendSearchInput(pageClient, query) {
   };
 }
 
-async function searchExternalFriendByCustomerId(pageClient, customerId, customerInfo = '') {
+async function searchExternalFriendByCustomerId(
+  pageClient,
+  customerId,
+  customerInfo = '',
+  { pollIntervalMs = 500 } = {}
+) {
   const searchTerms = extractCustomerSearchTerms(customerInfo, customerId);
   if (searchTerms.length === 0) {
     return { ok: false, reason: 'search-term-missing' };
@@ -1184,7 +1382,7 @@ async function searchExternalFriendByCustomerId(pageClient, customerId, customer
     if (!typed.ok) {
       return typed;
     }
-    await sleep(600);
+    await sleep(pollIntervalMs);
 
     const startedAt = Date.now();
     while (Date.now() - startedAt < 15000) {
@@ -1194,7 +1392,7 @@ async function searchExternalFriendByCustomerId(pageClient, customerId, customer
       if (match) {
         return { ok: true, items: results, match, searchTerm: term };
       }
-      await sleep(500);
+      await sleep(pollIntervalMs);
     }
   }
 
@@ -1211,11 +1409,12 @@ async function selectSearchedFriend(
   pageClient,
   customerId,
   friendIndex = null,
-  customerInfo = ''
+  customerInfo = '',
+  { waitAfterSelect = true } = {}
 ) {
   if (friendIndex != null && Number.isFinite(friendIndex)) {
     const clicked = await clickFriendItem(pageClient, friendIndex);
-    if (clicked.ok) {
+    if (clicked.ok && waitAfterSelect) {
       await sleep(WAIT_MS);
     }
     return clicked;
@@ -1242,7 +1441,7 @@ async function selectSearchedFriend(
       };
     })()`
   );
-  if (result.ok) {
+  if (result.ok && waitAfterSelect) {
     await sleep(WAIT_MS);
   }
   return result;
@@ -1626,7 +1825,16 @@ async function waitForStableMessages(iframeClient, pauseCtx = null) {
 
 async function waitForDateBoundedMessages(
   iframeClient,
-  { dateStart, dateEnd, log, paced = false, pauseFile, stopFile, shutdownRequested }
+  {
+    dateStart,
+    dateEnd,
+    log,
+    paced = false,
+    domPaceConfig = getDomPaceConfig(),
+    pauseFile,
+    stopFile,
+    shutdownRequested
+  }
 ) {
   const pauseCtx = { pauseFile, stopFile, shutdownRequested, log };
   const seen = new Map();
@@ -1710,19 +1918,32 @@ async function waitForDateBoundedMessages(
       break;
     }
 
+    const beforeDomState = paced ? await getMessageDomState(iframeClient) : null;
     const moved = await scrollIframeMessagesForward(iframeClient, { paced });
     log(
       `[conversation] scroll ${scrolls + 1}/${MAX_MESSAGE_SCROLLS} moved=${moved.moved} atBottom=${moved.atBottom} observed=${allMessages.length} inRange=${filtered.messages.length}`
     );
     if (paced) {
-      const scrollDelay = randomInt(
-        MESSAGE_SCROLL_DELAY_MIN_MS,
-        MESSAGE_SCROLL_DELAY_MAX_MS
-      );
-      if (scrollDelay > 0 && log) {
-        log(`[paced] wait ${scrollDelay}ms after message scroll`);
+      const domWait = await waitForMessageDomChange(iframeClient, beforeDomState, {
+        timeoutMs: domPaceConfig.DOM_MESSAGE_CHANGE_TIMEOUT_MS,
+        intervalMs: domPaceConfig.DOM_POLL_INTERVAL_MS,
+        log,
+        pauseCtx
+      });
+      if (domWait.stopped) {
+        const allMessages = Array.from(seen.values());
+        const filteredStop = filterMessagesByDateRange(allMessages, dateStart, dateEnd);
+        return {
+          ...filteredStop,
+          attempts: stable.attempts,
+          loaded: false,
+          incomplete: true,
+          scrolls: scrolls + 1,
+          scrollStopReason: 'shutdown',
+          totalObservedMessageCount: allMessages.length,
+          shutdown: true
+        };
       }
-      await sleepWithPauseCheck(scrollDelay, pauseCtx);
     } else {
       await sleepWithPauseCheck(STABLE_POLL_MS, pauseCtx);
     }
@@ -1889,12 +2110,7 @@ export async function exportCurrentPage({
   EMPLOYEE_DELAY_MIN_MS = Number(process.env.EMPLOYEE_DELAY_MIN_MS || '5000');
   EMPLOYEE_DELAY_MAX_MS = Number(process.env.EMPLOYEE_DELAY_MAX_MS || '5000');
   BATCH_REST_MS = Number(process.env.BATCH_REST_MS || '5000');
-  SEARCH_RESULT_DELAY_MIN_MS = Number(process.env.SEARCH_RESULT_DELAY_MIN_MS || '1500');
-  SEARCH_RESULT_DELAY_MAX_MS = Number(process.env.SEARCH_RESULT_DELAY_MAX_MS || '4000');
-  SELECT_FRIEND_DELAY_MIN_MS = Number(process.env.SELECT_FRIEND_DELAY_MIN_MS || '2000');
-  SELECT_FRIEND_DELAY_MAX_MS = Number(process.env.SELECT_FRIEND_DELAY_MAX_MS || '5000');
-  MESSAGE_SCROLL_DELAY_MIN_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MIN_MS || '1500');
-  MESSAGE_SCROLL_DELAY_MAX_MS = Number(process.env.MESSAGE_SCROLL_DELAY_MAX_MS || '4000');
+  const domPaceConfig = getDomPaceConfig();
 
   const dataset = await loadDataset(outputPath, jsonlPath);
   let activeRetryList = Array.isArray(retryFailedConversations)
@@ -2301,19 +2517,21 @@ export async function exportCurrentPage({
             let openedVia = null;
 
             if (useMetricDirectOpen) {
-              const metricOpened = await openChatFromMetricTableRow(pageClient, target);
+              const metricOpened = await openChatFromMetricTableRow(pageClient, target, {
+                postOpenSleep: !paced
+              });
               if (metricOpened.ok) {
                 openedVia = `metric-row:${metricOpened.method || 'unknown'}`;
                 log(
                   `[conversation] opened customer=${target.customerId} via ${openedVia} matched=${metricOpened.matchedId || target.customerId} category=${target.metricCategory || target.sourceMetricCategories?.[0]}`
                 );
-                await pacedSleep({
-                  enabled: paced,
-                  minMs: SELECT_FRIEND_DELAY_MIN_MS,
-                  maxMs: SELECT_FRIEND_DELAY_MAX_MS,
-                  label: `after metric open ${target.customerId}`,
-                  log
-                });
+                if (paced) {
+                  await waitForMessageIframeReady(pageSession.target.id, {
+                    timeoutMs: domPaceConfig.DOM_SELECT_READY_TIMEOUT_MS,
+                    intervalMs: domPaceConfig.DOM_POLL_INTERVAL_MS,
+                    log
+                  });
+                }
               }
             }
 
@@ -2344,7 +2562,8 @@ export async function exportCurrentPage({
               const searched = await searchExternalFriendByCustomerId(
                 pageClient,
                 target.customerId,
-                target.customerInfo
+                target.customerInfo,
+                { pollIntervalMs: paced ? domPaceConfig.DOM_POLL_INTERVAL_MS : 500 }
               );
               await assertNoRateLimitForTarget({
                 pageClient,
@@ -2380,19 +2599,25 @@ export async function exportCurrentPage({
                 await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount });
                 continue;
               }
-              await pacedSleep({
-                enabled: paced,
-                minMs: SEARCH_RESULT_DELAY_MIN_MS,
-                maxMs: SEARCH_RESULT_DELAY_MAX_MS,
-                label: `after search ${target.customerId}`,
-                log
-              });
+              if (paced) {
+                await waitForFriendSearchReady(
+                  pageClient,
+                  target.customerId,
+                  target.customerInfo,
+                  {
+                    timeoutMs: domPaceConfig.DOM_SEARCH_READY_TIMEOUT_MS,
+                    intervalMs: domPaceConfig.DOM_POLL_INTERVAL_MS,
+                    log
+                  }
+                );
+              }
 
               const selected = await selectSearchedFriend(
                 pageClient,
                 target.customerId,
                 searched.match?.friendIndex,
-                target.customerInfo
+                target.customerInfo,
+                { waitAfterSelect: !paced }
               );
               await assertNoRateLimitForTarget({
                 pageClient,
@@ -2425,13 +2650,19 @@ export async function exportCurrentPage({
               }
               openedVia = 'external-friend-search';
               friendLabel = selected.text || friendLabel;
-              await pacedSleep({
-                enabled: paced,
-                minMs: SELECT_FRIEND_DELAY_MIN_MS,
-                maxMs: SELECT_FRIEND_DELAY_MAX_MS,
-                label: `after select ${target.customerId}`,
-                log
-              });
+              if (paced) {
+                await waitForSelectedFriendReady(
+                  pageClient,
+                  pageSession.target.id,
+                  target.customerId,
+                  target.customerInfo,
+                  {
+                    timeoutMs: domPaceConfig.DOM_SELECT_READY_TIMEOUT_MS,
+                    intervalMs: domPaceConfig.DOM_POLL_INTERVAL_MS,
+                    log
+                  }
+                );
+              }
             }
 
             try {
@@ -2442,6 +2673,7 @@ export async function exportCurrentPage({
                   dateEnd,
                   log,
                   paced,
+                  domPaceConfig,
                   pauseFile,
                   stopFile,
                   shutdownRequested

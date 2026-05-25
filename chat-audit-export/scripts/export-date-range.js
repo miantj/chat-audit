@@ -59,6 +59,10 @@ function showUsage() {
     '  CUSTOMER_DELAY_MAX_MS   Paced delay after each customer (default 3000)',
     '  CUSTOMERS_PER_BATCH     Paced batch size before rest (default 10)',
     '  BATCH_REST_MS           Paced rest after each batch (default 5000)',
+    '  DOM_POLL_INTERVAL_MS              DOM poll interval (default 150)',
+    '  DOM_SEARCH_READY_TIMEOUT_MS       Search result ready timeout (default 4000)',
+    '  DOM_SELECT_READY_TIMEOUT_MS       Friend selected + iframe timeout (default 5000)',
+    '  DOM_MESSAGE_CHANGE_TIMEOUT_MS     Message scroll DOM change timeout (default 1200)',
     '',
     'Example:',
     '  node export-date-range.js --start=2026-04-27 --end=2026-04-27 --keywords=小米,丽丽'
@@ -177,12 +181,10 @@ if (fastMode) {
   process.env.EMPLOYEE_DELAY_MIN_MS = '300';
   process.env.EMPLOYEE_DELAY_MAX_MS = '600';
   process.env.BATCH_REST_MS = '300';
-  process.env.SEARCH_RESULT_DELAY_MIN_MS = '300';
-  process.env.SEARCH_RESULT_DELAY_MAX_MS = '600';
-  process.env.SELECT_FRIEND_DELAY_MIN_MS = '300';
-  process.env.SELECT_FRIEND_DELAY_MAX_MS = '600';
-  process.env.MESSAGE_SCROLL_DELAY_MIN_MS = '500';
-  process.env.MESSAGE_SCROLL_DELAY_MAX_MS = '1000';
+  process.env.DOM_POLL_INTERVAL_MS = '100';
+  process.env.DOM_SEARCH_READY_TIMEOUT_MS = '2500';
+  process.env.DOM_SELECT_READY_TIMEOUT_MS = '3500';
+  process.env.DOM_MESSAGE_CHANGE_TIMEOUT_MS = '800';
   process.env.STABLE_POLL_MS = '600';
   process.env.STABLE_ATTEMPTS = '6';
 }

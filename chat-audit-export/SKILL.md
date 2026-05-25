@@ -226,7 +226,7 @@ node scripts/export-date-range.js \
 
 `--skip-date-validation`: dialog date filter may not match Vue-set main table; export still scopes by `--start`/`--end`.
 
-**Paced export:** Full exports enable paced delays by default to reduce page pressure and protect checkpoint progress. Tiny samples (`--max=1 --max-rows=1`) run fast unless `--paced` is passed. Use `--no-paced` only for short debugging. Tunables:
+**Paced export:** Full exports enable paced mode by default to reduce page pressure and protect checkpoint progress. When paced is on, **search / friend select / message scroll** use **DOM-driven waits** (poll until results, iframe, or message DOM change) instead of fixed sleeps. Tiny samples (`--max=1 --max-rows=1`) run fast unless `--paced` is passed. Use `--no-paced` only for short debugging. Tunables:
 
 ```bash
 CUSTOMER_DELAY_MIN_MS=1000
@@ -235,7 +235,13 @@ CUSTOMERS_PER_BATCH=10
 EMPLOYEE_DELAY_MIN_MS=5000
 EMPLOYEE_DELAY_MAX_MS=5000
 BATCH_REST_MS=5000
+DOM_POLL_INTERVAL_MS=150
+DOM_SEARCH_READY_TIMEOUT_MS=4000
+DOM_SELECT_READY_TIMEOUT_MS=5000
+DOM_MESSAGE_CHANGE_TIMEOUT_MS=1200
 ```
+
+Customer/employee/batch delays remain short fixed rests for anti rate-limit spacing only.
 
 If the page shows `请求过于频繁` / similar frequency warnings, export stops with `RATE_LIMITED`, saves JSON/checkpoint, and should be resumed later from the same output path.
 
