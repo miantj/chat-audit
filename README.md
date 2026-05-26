@@ -14,7 +14,7 @@ Electron 桌面壳 + `chat-audit-export/` 导出脚本（与 Skill 共用）。
 |------|------|
 | 开发 `pnpm start` | Node 20+、Python 3.8+、`pip install -r chat-audit-export/scripts/requirements-preflight.txt`、本机 Chrome |
 | 安装包（用户） | 仅 Chrome；内嵌 Node 16 + `crm-preflight.exe` |
-| Win7 目标 | 64 位；构建须 Electron 22 + Python 3.8 打 preflight → 见 [win7 文档](electron/docs/win7-build-compatibility.md) |
+| Win7 目标 | 64 位；Electron 22 + Node 16（自动 `NODE_SKIP_PLATFORM_CHECK`）+ Python 3.8 打 preflight → [win7 文档](electron/docs/win7-build-compatibility.md) |
 
 ## 用户
 

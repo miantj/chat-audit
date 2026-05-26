@@ -1,3 +1,6 @@
+if (process.platform === 'win32') {
+  process.env.NODE_SKIP_PLATFORM_CHECK = '1';
+}
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';

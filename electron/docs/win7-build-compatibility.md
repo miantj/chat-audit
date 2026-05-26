@@ -69,9 +69,11 @@ rmdir /s /q "%LOCALAPPDATA%\Programs\一手聊天审计导出"
 | `Cannot use import statement outside a module` | [B1](#b1-主进程打包) |
 | `Cannot find package 'electron-log'` | [B1](#b1-主进程打包) |
 | `Cannot find module '...\app.asar\main.mjs'` | [B1](#b1-主进程打包) |
+| `WebSocketImpl is not a constructor` / `active chatAudit page not found` | [C4](#c4-ws-cdp) |
 | `bootstrap v4: unpacked-first` 仍打不开 | [B2](#b2-安装版无反应) |
 | `invalid choice: 'prepare-export'` | [C1](#c1-preflight) |
-| `ENOENT: mkdir '\\?'` | [C2](#c2-输出路径) |
+| 导出失败 `exit 216` / `only supported on Windows 8.1` | [C2](#c2-node-win7) |
+| `ENOENT: mkdir '\\?'` | [C3](#c3-输出路径) |
 | `Expand-Archive` / `LiteralPath` 为空 | [D1](#d1-powershell) |
 | `EPERM` rename `node-v16...` | [D2](#d2-rename) |
 | PyInstaller `Python: 3.14` | [D3](#d3-python-38) |
@@ -211,7 +213,60 @@ node scripts\prepare-runtime.cjs --win-x64 --force
 pnpm build
 ```
 
-### C2 输出路径 {#c2-输出路径}
+### C2 Node Win7（exit 216）{#c2-node-win7}
+
+```text
+导出失败 (exit 216)
+Node.js is only supported on Windows 8.1, Windows Server 2012 R2, or higher.
+Setting the NODE_SKIP_PLATFORM_CHECK environment variable to 1 skips this check
+```
+
+内嵌 **Node 16.20.2 官方包**在 Win7 上会拒绝启动（非脚本 bug）。应用已对 Windows 导出子进程设置 `NODE_SKIP_PLATFORM_CHECK=1`（见 `runtime-paths.js`）。
+
+**须用含该修复的安装包**；旧包请重新 `pnpm build` 并安装。
+
+本机验证内嵌 Node：
+
+```bat
+set NODE_SKIP_PLATFORM_CHECK=1
+"%LOCALAPPDATA%\Programs\ChatAuditExport\resources\runtime\node-win32-x64\node.exe" -v
+```
+
+应输出 `v16.20.2` 而非 216。若仍失败，考虑换 Win10+ 或自行替换为 [node16-win7](https://github.com/Alex313031/node16-win7) 构建的 `node.exe` 后重打 `prepare-runtime`。
+
+### C4 ws / CDP（Win7 Node 16）{#c4-ws-cdp}
+
+```text
+[CDP] Failed to inspect target: ... Error: TypeError: WebSocketImpl is not a constructor
+Export failed: active chatAudit page not found
+Diagnosed page state: AUDIT_EMPLOYEE_LIST_READY
+```
+
+预检（Python）正常，但 Node 16 上 `globalThis.WebSocket` 常为不可用占位，误用会报 `not a constructor`。
+
+**当前逻辑（`cdp.js`）**：优先 `require(ws/index.js)`；找不到则使用内置零依赖 `node-ws-client.js`（不再回退 globalThis）。
+
+导出日志应出现一行诊断，例如：
+
+```text
+[CDP] ws backend=node-ws source=...\ws\index.js ...
+[CDP] ws backend=builtin source=node-ws-client.js ...
+```
+
+若仍为 `not a constructor` → 安装包内 `cdp.js` 过旧，请同步仓库后重装。
+
+`ECONNREFUSED 127.0.0.1:80`：Chrome 返回的 `webSocketDebuggerUrl` 常无端口，旧版会误连 80。新版 `cdp.js` 会按 `CHAT_AUDIT_CRM_CDP_BASE` 补 `:9222`。
+
+```bat
+cd C:\dev\electron
+node scripts\copy-ws-to-scripts.cjs
+rmdir /s /q dist
+pnpm build
+dir dist\win-unpacked\resources\scripts\node_modules\ws\index.js
+dir dist\win-unpacked\resources\scripts\lib\node-ws-client.js
+```
+
+### C3 输出路径 {#c3-输出路径}
 
 ```text
 ENOENT: no such file or directory, mkdir '\\?'

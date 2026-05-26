@@ -9,8 +9,8 @@
     "start": "electron .",
     "rebuild:electron": "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ pnpm rebuild electron",
     "prepare-runtime": "node scripts/prepare-runtime.cjs",
-    "prebuild": "node scripts/prepare-runtime.cjs --win-x64",
-    "prebuild:mac": "node scripts/prepare-runtime.cjs",
+    "prebuild": "node scripts/prepare-runtime.cjs --win-x64 && node scripts/copy-ws-to-scripts.cjs",
+    "prebuild:mac": "node scripts/prepare-runtime.cjs && node scripts/copy-ws-to-scripts.cjs",
     "build": "electron-builder --win --x64",
     "build:mac": "electron-builder --mac",
     "build:mac:arm64": "electron-builder --mac --arm64",
@@ -38,12 +38,18 @@
       "main.mjs",
       "preload.cjs",
       "src/**",
-      "renderer/**"
+      "renderer/**",
+      "node_modules/ws/**"
     ],
     "extraResources": [
       {
         "from": "../chat-audit-export/scripts",
         "to": "scripts",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "node_modules/ws",
+        "to": "scripts/node_modules/ws",
         "filter": ["**/*"]
       },
       {
@@ -89,6 +95,7 @@
     "electron-builder": "^25.0.0"
   },
   "dependencies": {
-    "electron-log": "^5.0.0"
+    "electron-log": "^5.0.0",
+    "ws": "^8.18.0"
   }
 }

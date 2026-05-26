@@ -7,6 +7,9 @@
  *   node scripts/start-export.mjs --start=2026-05-21
  *   node scripts/start-export.mjs --start=2026-05-20 --end=2026-05-21 --output-dir=./exports
  */
+if (process.platform === 'win32') {
+  process.env.NODE_SKIP_PLATFORM_CHECK = '1';
+}
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';

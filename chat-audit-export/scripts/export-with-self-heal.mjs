@@ -2,6 +2,9 @@
 /**
  * 导出编排：自愈重试、失败补跑、CSV（纯 Node，Electron / CLI 共用）。
  */
+if (process.platform === 'win32') {
+  process.env.NODE_SKIP_PLATFORM_CHECK = '1';
+}
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,6 +17,7 @@ import {
   LARGE_JSON_BYTES
 } from './lib/export-json-stats.js';
 import { ensureCdpReady, isCdpUp } from './lib/cdp-bootstrap.mjs';
+import { logCdpWebSocketBootstrap } from './lib/cdp.js';
 import {
   buildRetryRunEnv,
   FAILED_RETRY_MAX,
@@ -520,6 +524,8 @@ async function main() {
   } else {
     log('[preflight] Electron prepare-export passed, skipping gate-start-export');
   }
+
+  logCdpWebSocketBootstrap();
 
   let attempt = 0;
   while (true) {

@@ -26,7 +26,12 @@ import {
   ensureAuditChrome,
   DEFAULT_CDP
 } from './src/lib/cdp-probe.js';
-import { verifyBundledRuntime } from './src/lib/runtime-paths.js';
+import {
+  applyWin7NodePlatformWorkaround,
+  verifyBundledRuntime
+} from './src/lib/runtime-paths.js';
+
+applyWin7NodePlatformWorkaround();
 
 const { app, BrowserWindow, ipcMain, dialog } = electron;
 

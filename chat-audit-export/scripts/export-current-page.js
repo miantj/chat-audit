@@ -556,11 +556,17 @@ async function saveDataset(filePath, dataset) {
   await fs.writeFile(filePath, JSON.stringify(dataset, null, 2), 'utf8');
 }
 
+function getCdpHttpBase() {
+  return (process.env.CHAT_AUDIT_CRM_CDP_BASE || 'http://localhost:9222').replace(
+    /\/$/,
+    ''
+  );
+}
+
 function getTargets() {
-  // URL must use 'localhost' not '127.0.0.1' — Chrome CDP may only listen on IPv6 ([::1])
-  // after a bind() failure on the IPv4 socket (port conflict).
+  const listUrl = `${getCdpHttpBase()}/json/list`;
   return new Promise((resolve, reject) => {
-    http.get('http://localhost:9222/json/list', (res) => {
+    http.get(listUrl, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
@@ -625,8 +631,8 @@ async function getPageSession() {
     try {
       const state = await inspectPageState(target);
       states.push({ target, state });
-    } catch {
-      // ignore broken targets and continue with others
+    } catch (err) {
+      console.warn(`[CDP] Failed to inspect target: ${target.url || target.id}. Error:`, err);
     }
   }
 

@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = path.join(__dirname, '..');
-const required = ['electron', 'electron-log'];
+const required = ['electron', 'electron-log', 'ws'];
 
 const missing = required.filter((name) => {
   const dir = path.join(root, 'node_modules', name);

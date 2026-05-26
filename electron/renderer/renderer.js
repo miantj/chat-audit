@@ -68,6 +68,14 @@ function defaultExportDate() {
   return addDays(localDateStr(), -1);
 }
 
+/** 导出日期不缓存，每次进入界面默认为昨天 */
+function applyDefaultExportDate() {
+  const d = defaultExportDate();
+  startDate.value = d;
+  endDate.value = d;
+  applySingleDayMode();
+}
+
 function applySingleDayMode() {
   const single = singleDayMode.checked;
   endDate.disabled = single;
@@ -98,7 +106,6 @@ function setDatePreset(preset) {
     endDate.value = pick;
   }
   applySingleDayMode();
-  persistFormSettings();
 }
 
 function statusStateText() {
@@ -232,11 +239,7 @@ function setUIState(state, options = {}) {
 }
 
 async function persistFormSettings() {
-  const { start, end } = getDateRange();
   const payload = {
-    startDate: start,
-    endDate: end,
-    exportDate: start,
     singleDayMode: singleDayMode.checked,
     useDateRange: !singleDayMode.checked,
     outputDir: outputDir.value,
@@ -247,11 +250,6 @@ async function persistFormSettings() {
 
 async function restoreFormSettings() {
   const saved = await getSettings();
-  const fallback = defaultExportDate();
-  const start =
-    saved.startDate || saved.exportDate || fallback;
-  startDate.value = start;
-  endDate.value = saved.endDate || start;
 
   const single =
     saved.singleDayMode != null
@@ -264,7 +262,7 @@ async function restoreFormSettings() {
   if (saved.outputDir) outputDir.value = saved.outputDir;
   if (saved.department) department.value = saved.department;
 
-  applySingleDayMode();
+  applyDefaultExportDate();
 
   if (saved.outputDir) {
     addLog(`已恢复输出目录: ${saved.outputDir}`, 'info');
@@ -386,11 +384,6 @@ startDate.addEventListener('change', () => {
   } else if (endDate.value < startDate.value) {
     endDate.value = startDate.value;
   }
-  persistFormSettings();
-});
-
-endDate.addEventListener('change', () => {
-  persistFormSettings();
 });
 
 startBtn.addEventListener('click', async () => {
@@ -559,13 +552,7 @@ if (onChromeStatus) {
 setUIState('idle');
 restoreFormSettings()
   .then(() => {
-    if (!startDate.value) {
-      const d = defaultExportDate();
-      startDate.value = d;
-      endDate.value = d;
-      applySingleDayMode();
-    }
-    addLog(`默认导出日期：${startDate.value}（本地时区）`, 'info');
+    addLog(`默认导出日期：${startDate.value}（昨天，本地时区）`, 'info');
     addLog('工具已就绪；请在专用 Chrome 窗口登录 CRM（非日常浏览器），关闭后重开仍保留登录态');
     addLog('导出已启用温和加速（paced 等待约为 Skill 默认一半）');
   })
