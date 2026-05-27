@@ -256,7 +256,7 @@ function toSafePackageFileName(filePath) {
 }
 
 function genericPackageDownloadUrl(safeFileName) {
-  return `${gitlabBaseUrl}/${projectId}/-/packages/generic/${packageName}/${packageVersion}/${encodeURIComponent(safeFileName)}`;
+  return `${gitlabBaseUrl}/api/v4/projects/${encodeURIComponent(projectId)}/packages/generic/${packageName}/${packageVersion}/${encodeURIComponent(safeFileName)}`;
 }
 
 async function uploadLargeArtifact(encodedProjectId, file) {
