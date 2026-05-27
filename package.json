@@ -12,6 +12,8 @@
     "build:dir": "pnpm --dir electron build:dir",
     "release": "pnpm --dir electron release",
     "release:mac": "pnpm --dir electron release:mac",
-    "release:win": "pnpm --dir electron release:win"
+    "release:upload:mac": "pnpm --dir electron release:upload:mac",
+    "release:win": "pnpm --dir electron release:win",
+    "release:upload:win": "pnpm --dir electron release:upload:win"
   }
 }

@@ -78,38 +78,54 @@ type "%APPDATA%\chat-audit-export\logs\bootstrap.log"
 
 Mac 上 `prepare-runtime` 只生成 darwin runtime；Windows 包须在 Windows 重跑 `prepare-runtime` 再 `pnpm build`。
 
-## 发布 Release
+## 发布 Release（GitLab）
 
-GitHub Actions 会在推送 `v*` 标签时自动构建 macOS / Windows 安装包，并发布到 [Releases](https://github.com/miantj/chat-audit/releases)。
+项目地址：[yishou-front/chat-audit-export](https://gitlab.yishou.com/yishou-front/chat-audit-export/-/releases)
 
-### 自动发布（推荐）
+### 方式一：仅打包，网页手动上传（最简单）
 
 ```bash
-# 1. 更新 electron/package.json 中的 version（可选，CI 会按 tag 同步）
-# 2. 提交并打标签
+cd electron
+pnpm install
+pnpm run build:mac          # 或 Windows 上 pnpm build
+```
+
+产物在 `electron/dist/`（如 `*.dmg`、`一手聊天审计导出 Setup *.exe`）。  
+打开 GitLab → **Deploy → Releases → New release**，填写版本号（如 `v1.0.1`），把 `dist` 里的安装包拖进附件即可。
+
+**不要把 `dist/` 提交进 Git。**
+
+### 方式二：本地打包并自动上传到 GitLab Release
+
+1. 在 GitLab 创建 [Personal Access Token](https://gitlab.yishou.com/-/user_settings/personal_access_tokens)，勾选 `api`、`write_repository`。
+2. 配置 Token：
+
+```bash
+cd electron
+cp .env.example .env
+# 编辑 .env，填入 GITLAB_TOKEN=glpat-...
+```
+
+1. 更新 `electron/package.json` 里的 `version`，然后发布：
+
+```bash
+# 仓库根目录
+pnpm release:mac           # macOS：打包 + 上传
+pnpm release:upload:mac    # 仅上传 dist/ 里已有 dmg（跳过打包）
+pnpm release:win           # Windows（须在 Windows 上执行）
+pnpm release:upload:win    # 仅上传 dist/ 里已有 exe
+```
+
+Release 标签默认为 `v` + `version`（如 `v1.0.0`）。大安装包通过 GitLab Generic Package 上传，Release 页面会显示下载链接。
+
+### 版本与标签（可选）
+
+若希望 Git 标签与 Release 一致，可在发布前打标签并推送：
+
+```bash
 git tag v1.0.1
 git push origin v1.0.1
 ```
-
-### 手动触发
-
-在 GitHub → Actions → **Release** → **Run workflow**，填写版本号（如 `1.0.1`）。
-
-### 本地发布
-
-需先设置 `GH_TOKEN`（GitHub Personal Access Token，含 `repo` 权限）：
-
-```bash
-export GH_TOKEN=ghp_xxxx
-
-# macOS
-pnpm release:mac
-
-# Windows
-pnpm release:win
-```
-
-产物：macOS `*.dmg`（arm64 + x64）、Windows `一手聊天审计导出 Setup *.exe`。
 
 ## 无 GUI
 
