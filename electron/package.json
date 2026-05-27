@@ -15,7 +15,10 @@
     "build:mac": "electron-builder --mac",
     "build:mac:arm64": "electron-builder --mac --arm64",
     "build:mac:x64": "electron-builder --mac --x64",
-    "build:dir": "electron-builder --win --x64 --dir"
+    "build:dir": "electron-builder --win --x64 --dir",
+    "release": "electron-builder --publish always",
+    "release:mac": "electron-builder --mac --publish always",
+    "release:win": "electron-builder --win --x64 --publish always"
   },
   "build": {
     "appId": "com.yishou.chat-audit-export",
@@ -88,6 +91,12 @@
       "createStartMenuShortcut": true,
       "shortcutName": "ChatAuditExport",
       "uninstallDisplayName": "ChatAuditExport"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "miantj",
+      "repo": "chat-audit",
+      "releaseType": "release"
     }
   },
   "devDependencies": {

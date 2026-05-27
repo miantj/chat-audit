@@ -78,6 +78,39 @@ type "%APPDATA%\chat-audit-export\logs\bootstrap.log"
 
 Mac 上 `prepare-runtime` 只生成 darwin runtime；Windows 包须在 Windows 重跑 `prepare-runtime` 再 `pnpm build`。
 
+## 发布 Release
+
+GitHub Actions 会在推送 `v*` 标签时自动构建 macOS / Windows 安装包，并发布到 [Releases](https://github.com/miantj/chat-audit/releases)。
+
+### 自动发布（推荐）
+
+```bash
+# 1. 更新 electron/package.json 中的 version（可选，CI 会按 tag 同步）
+# 2. 提交并打标签
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+### 手动触发
+
+在 GitHub → Actions → **Release** → **Run workflow**，填写版本号（如 `1.0.1`）。
+
+### 本地发布
+
+需先设置 `GH_TOKEN`（GitHub Personal Access Token，含 `repo` 权限）：
+
+```bash
+export GH_TOKEN=ghp_xxxx
+
+# macOS
+pnpm release:mac
+
+# Windows
+pnpm release:win
+```
+
+产物：macOS `*.dmg`（arm64 + x64）、Windows `一手聊天审计导出 Setup *.exe`。
+
 ## 无 GUI
 
 见 `chat-audit-export/SKILL.md`（`crm-preflight.py`、`export-with-self-heal.mjs` 等）。

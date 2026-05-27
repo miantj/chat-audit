@@ -9,6 +9,9 @@
     "prepare-runtime": "pnpm --dir electron prepare-runtime",
     "build": "pnpm --dir electron build",
     "build:mac": "pnpm --dir electron build:mac",
-    "build:dir": "pnpm --dir electron build:dir"
+    "build:dir": "pnpm --dir electron build:dir",
+    "release": "pnpm --dir electron release",
+    "release:mac": "pnpm --dir electron release:mac",
+    "release:win": "pnpm --dir electron release:win"
   }
 }
