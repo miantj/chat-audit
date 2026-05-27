@@ -3,7 +3,7 @@ import path from 'node:path';
 /**
  * 解析导出 JSON 绝对路径（Windows 盘符、OUTPUT_PATH、相对路径）。
  */
-export function resolveExportOutputPath(raw, { cwd = process.cwd(), dateStart = '' } = {}) {
+export function resolveExportOutputPath(raw, { cwd = process.cwd(), dateStart = '', customerSelectionMode = 'effective' } = {}) {
   if (process.env.OUTPUT_PATH) {
     return normalizeOutputPath(process.env.OUTPUT_PATH, cwd);
   }
@@ -14,7 +14,8 @@ export function resolveExportOutputPath(raw, { cwd = process.cwd(), dateStart = 
         ? dir
         : path.resolve(cwd, dir)
       : path.join(cwd, 'exports');
-    return path.join(exportDir, `chat-audit-${dateStart}.json`);
+    const prefix = customerSelectionMode === 'all' ? 'chat-audit-all-customers' : 'chat-audit';
+    return path.join(exportDir, `${prefix}-${dateStart}.json`);
   }
   return normalizeOutputPath(String(raw), cwd);
 }

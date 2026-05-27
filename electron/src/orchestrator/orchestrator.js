@@ -5,7 +5,11 @@ import {
 } from '../lib/cdp-probe.js';
 import { prepareCrmPage } from '../lib/preflight-runner.js';
 import path from 'node:path';
-import { runExportEngine, countFailedConversations } from '../lib/run-export-engine.js';
+import {
+  runExportEngine,
+  countFailedConversations,
+  resolveExportJsonPath
+} from '../lib/run-export-engine.js';
 import fs from 'node:fs/promises';
 
 export class Orchestrator {
@@ -53,7 +57,8 @@ export class Orchestrator {
 
     await fs.mkdir(outputDir, { recursive: true });
 
-    const outputPath = path.join(outputDir, `chat-audit-${start}.json`);
+    const allCustomers = Boolean(this.options.allCustomers);
+    const outputPath = resolveExportJsonPath(outputDir, start, allCustomers);
     const failedCount = countFailedConversations(outputPath);
 
     this.ev.emit('progress', {
@@ -67,7 +72,7 @@ export class Orchestrator {
 
     const startTime = Date.now();
     const { proc, done } = runExportEngine(
-      { start, end, department, outputDir },
+      { start, end, department, outputDir, allCustomers },
       this.ev
     );
     this._exportProc = proc;

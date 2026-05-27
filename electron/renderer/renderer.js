@@ -24,6 +24,7 @@ const {
 const startDate = document.getElementById('startDate');
 const endDate = document.getElementById('endDate');
 const singleDayMode = document.getElementById('singleDayMode');
+const allCustomers = document.getElementById('allCustomers');
 const department = document.getElementById('department');
 const outputDir = document.getElementById('outputDir');
 const selectDirBtn = document.getElementById('selectDir');
@@ -242,6 +243,7 @@ async function persistFormSettings() {
   const payload = {
     singleDayMode: singleDayMode.checked,
     useDateRange: !singleDayMode.checked,
+    allCustomers: allCustomers.checked,
     outputDir: outputDir.value,
     department: department.value
   };
@@ -258,6 +260,7 @@ async function restoreFormSettings() {
         ? true
         : !saved.useDateRange;
   singleDayMode.checked = single;
+  allCustomers.checked = Boolean(saved.allCustomers);
 
   if (saved.outputDir) outputDir.value = saved.outputDir;
   if (saved.department) department.value = saved.department;
@@ -377,6 +380,10 @@ singleDayMode.addEventListener('change', () => {
   persistFormSettings();
 });
 
+allCustomers.addEventListener('change', () => {
+  persistFormSettings();
+});
+
 startDate.addEventListener('change', () => {
   endDate.min = startDate.value;
   if (singleDayMode.checked) {
@@ -404,14 +411,18 @@ startBtn.addEventListener('click', async () => {
 
   resetProgress();
   setUIState('running');
-  addLog(`开始导出：${start}${start === end ? '' : ` ~ ${end}`}`);
+  const modeLabel = allCustomers.checked ? '全部外部好友' : '有效指标客户';
+  addLog(
+    `开始导出：${start}${start === end ? '' : ` ~ ${end}`}（${modeLabel}）`
+  );
   await persistFormSettings();
 
   const result = await startExport({
     startDate: start,
     endDate: end,
     department: department.value,
-    outputDir: outputDir.value
+    outputDir: outputDir.value,
+    allCustomers: allCustomers.checked
   });
 
   if (!result.success) {

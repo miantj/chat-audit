@@ -44,6 +44,8 @@ function showUsage() {
     '  --out=./data.json       Output dataset path (default: $PWD/exports/chat-audit-YYYY-MM-DD.json)',
     '  --category=xxx          Expected category filter text',
     '  --tab=xxx               Expected active tab text',
+    '  --all-customers         Export every external friend instead of only effective metric customers',
+    '  --no-effective-filter   Alias for --all-customers',
     '  --paced                 Enable paced export delays for small samples',
     '  --no-paced              Disable paced export delays',
     '  --dry-run-targets       Probe metric categories and print target customer IDs without exporting messages',
@@ -107,7 +109,10 @@ function isPathInside(child, parent) {
   return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
-const outputPath = resolveExportOutputPath(opts.out, { cwd, dateStart });
+const customerSelectionMode =
+  opts['all-customers'] === true || opts['no-effective-filter'] === true ? 'all' : 'effective';
+
+const outputPath = resolveExportOutputPath(opts.out, { cwd, dateStart, customerSelectionMode });
 if (isPathInside(outputPath, skillRoot)) {
   console.error(
     [
@@ -279,6 +284,7 @@ console.log(JSON.stringify({
   jsonlPath,
   targetKeywords,
   maxConversations,
+  customerSelectionMode,
   paced
 }, null, 2));
 
@@ -290,6 +296,7 @@ try {
     dateStart,
     dateEnd,
     targetKeywords,
+    customerSelectionMode,
     maxConversations,
     maxRows,
     expectedCategory,

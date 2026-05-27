@@ -63,7 +63,9 @@ function parseCliArgs(argv) {
     paced: false,
     retryFailed: false,
     fast: false,
-    fullExport: false
+    fullExport: false,
+    allCustomers: false,
+    noEffectiveFilter: false
   };
   for (const arg of argv) {
     if (arg.startsWith('--start=')) opts.start = arg.slice(8);
@@ -76,6 +78,8 @@ function parseCliArgs(argv) {
     else if (arg === '--retry-failed') opts.retryFailed = true;
     else if (arg === '--fast') opts.fast = true;
     else if (arg === '--full-export') opts.fullExport = true;
+    else if (arg === '--all-customers') opts.allCustomers = true;
+    else if (arg === '--no-effective-filter') opts.noEffectiveFilter = true;
     else {
       console.error(`Unknown option: ${arg}`);
       process.exit(1);
@@ -375,6 +379,8 @@ function runExportDateRange(opts, exportOut, env) {
   if (opts.paced) args.push('--paced');
   if (opts.retryFailed) args.push('--retry-failed');
   if (opts.fast) args.push('--fast');
+  if (opts.allCustomers) args.push('--all-customers');
+  if (opts.noEffectiveFilter) args.push('--no-effective-filter');
 
   return new Promise((resolve) => {
     let output = '';
@@ -455,11 +461,14 @@ async function main() {
   }
 
   const callerCwd = process.env.CHAT_AUDIT_CALLER_CWD || process.cwd();
+  const customerSelectionMode =
+    cli.allCustomers || cli.noEffectiveFilter ? 'all' : 'effective';
   const exportOut = resolveExportOutputPath(
     process.env.OUTPUT_PATH || cli.out || null,
     {
       cwd: process.env.CHAT_AUDIT_EXPORT_DIR || callerCwd,
-      dateStart: cli.start
+      dateStart: cli.start,
+      customerSelectionMode
     }
   );
 

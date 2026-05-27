@@ -15,7 +15,7 @@ metadata:
 
 一手 is a clothing wholesale platform. CS talks to shop owners on WeChat. The CRM **chat audit** page only shows one conversation at a time; this skill drives **bulk export** via Chrome CDP + Node.
 
-**Domain model:** Employee (main table row) → effective metric customer IDs (`总有效跟进好友数（人天）`, `总有效咨询好友数（人天）`) → searched external friend → Conversation (messages in `ww-open-data-frame` iframe). **Direction:** `left` / customer → `role: "customer"`; `right` / employee → `role: "official"`.
+**Domain model:** Employee (main table row) → effective metric customer IDs (`总有效跟进好友数（人天）`, `总有效咨询好友数（人天）`) → searched external friend → Conversation (messages in `ww-open-data-frame` iframe). With `--all-customers` / `--no-effective-filter`, the exporter instead walks every `沟通内容` / `外部好友` entry for each employee. **Direction:** `left` / customer → `role: "customer"`; `right` / employee → `role: "official"`.
 
 **Dataset shape** (one object per conversation): `conversation_id`, `employee_name`, `customer_name`, `started_at`, `ended_at`, `message_count`, `messages[]` (with `attachments`, `meta`), `source_meta`. Message export is date-bounded: after selecting a customer, the script scrolls the message area forward until it reaches the first message after the requested date range, then saves only messages inside the range. `source_meta` records the message date bounds, filtered count, observed count, and scroll stop reason. Export artifacts belong in the caller's workspace `exports/` directory, not in the skill install directory.
 
@@ -245,11 +245,13 @@ Customer/employee/batch delays remain short fixed rests for anti rate-limit spac
 
 If the page shows `请求过于频繁` / similar frequency warnings, export stops with `RATE_LIMITED`, saves JSON/checkpoint, and should be resumed later from the same output path.
 
-**Traversal behavior:** The exporter does **not** walk every friend under `沟通内容`. For each employee dialog it:
+**Traversal behavior:** By default, the exporter does **not** walk every friend under `沟通内容`. For each employee dialog it:
 1. Clicks `总有效跟进好友数（人天）`, paginates the metric table, and extracts customer IDs from `客户信息`.
 2. Clicks `总有效咨询好友数（人天）`, paginates the metric table, and extracts customer IDs from `客户信息`.
 3. Deduplicates customers by employee + customer ID while preserving both metric categories in metadata.
 4. Switches back to `沟通内容` / `外部好友`, searches the customer ID, selects the exact matching result, then extracts the conversation using the existing iframe logic.
+
+To export every customer instead, add `--all-customers` or `--no-effective-filter`. In that mode the exporter switches to `沟通内容` / `外部好友`, paginates the full friend list, clicks each friend, and records friend-page checkpoints instead of metric checkpoints.
 
 **Message date boundary:** After a customer is selected, the exporter must keep scrolling the WeCom message iframe forward and collecting rendered messages until it sees a message later than `--end 23:59:59` (for single-day exports, the next day's first message). It then filters out messages outside `--start 00:00:00` through `--end 23:59:59` and moves to the next customer. If no later message is available, it stops at the end of the loaded conversation and records `source_meta.scroll_stop_reason=no_more_messages`. If the scroll guard is hit, it records `scroll_stop_reason=max_scrolls` and treats that conversation as incomplete.
 
@@ -269,7 +271,7 @@ node scripts/export-date-range.js \
 
 **Artifacts:** `.json`, `.jsonl`, `.checkpoint.json` next to the resolved output path.
 
-**Options:** `--keywords=`, `--category=` (department text), `--max=`, `--paced`, `--no-paced`. Full flags: `node scripts/export-date-range.js --help`.
+**Options:** `--keywords=`, `--category=` (department text), `--max=`, `--all-customers`, `--no-effective-filter`, `--paced`, `--no-paced`. Full flags: `node scripts/export-date-range.js --help`.
 
 **Self-heal state file:** `/tmp/chat-audit-self-heal-state.json` — clear to start fresh.
 

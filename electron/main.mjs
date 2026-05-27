@@ -64,7 +64,8 @@ function normalizeExportOptions(raw) {
     startDate: start,
     endDate: end,
     department: raw.department,
-    outputDir: raw.outputDir
+    outputDir: raw.outputDir,
+    allCustomers: Boolean(raw.allCustomers)
   };
 }
 

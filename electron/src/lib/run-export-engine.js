@@ -27,6 +27,11 @@ export function countFailedConversations(outputPath) {
   return countFailedFromLib(outputPath, getBundledNodeBin());
 }
 
+export function resolveExportJsonPath(outputDir, start, allCustomers = false) {
+  const prefix = allCustomers ? 'chat-audit-all-customers' : 'chat-audit';
+  return path.resolve(outputDir, `${prefix}-${start}.json`);
+}
+
 function countExportedConversations(outputPath) {
   const jsonlPath = outputPath.replace(/\.json$/i, '.jsonl');
   if (fs.existsSync(jsonlPath)) {
@@ -108,7 +113,8 @@ export function runExportEngine(options, eventEmitter) {
   const skillRoot = getSkillRoot();
   const nodeRunner = path.join(scriptsDir, 'export-with-self-heal.mjs');
   const nodeBin = getBundledNodeBin();
-  const outputPath = path.resolve(outputDir, `chat-audit-${start}.json`);
+  const allCustomers = Boolean(options.allCustomers);
+  const outputPath = resolveExportJsonPath(outputDir, start, allCustomers);
   const expectDept = options.department || '大客私域顾问-总';
 
   const runnerArgs = [
@@ -119,6 +125,9 @@ export function runExportEngine(options, eventEmitter) {
     '--keywords=',
     '--skip-date-validation'
   ];
+  if (allCustomers) {
+    runnerArgs.push('--all-customers');
+  }
 
   const failedCount = countFailedConversations(outputPath);
   const retryPassesUsed = readFailedRetryPassesUsed(outputPath);
