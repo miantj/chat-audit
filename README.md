@@ -5,6 +5,7 @@ Electron 桌面壳 + `chat-audit-export/` 导出脚本（与 Skill 共用）。
 | 目录 | 说明 |
 |------|------|
 | `electron/` | GUI、打包 |
+| `electron/docs/使用教程.md` | **用户使用教程**（发布时同步到 GitLab Release） |
 | `electron/docs/win7-build-compatibility.md` | **Windows / Win7 打包与排障（案例）** |
 | `chat-audit-export/` | 导出引擎、`SKILL.md` |
 
@@ -17,6 +18,8 @@ Electron 桌面壳 + `chat-audit-export/` 导出脚本（与 Skill 共用）。
 | Win7 目标 | 64 位；Electron 22 + Node 16（自动 `NODE_SKIP_PLATFORM_CHECK`）+ Python 3.8 打 preflight → [win7 文档](electron/docs/win7-build-compatibility.md) |
 
 ## 用户
+
+完整步骤见 [electron/docs/使用教程.md](electron/docs/使用教程.md)。简要流程：
 
 1. 安装打包产物（macOS：DMG；Windows：`一手聊天审计导出 Setup *.exe`）
 2. 启动后登录专用 Chrome 窗口中的 CRM
@@ -116,7 +119,13 @@ pnpm release:win           # Windows（须在 Windows 上执行）
 pnpm release:upload:win    # 仅上传 dist/ 里已有 exe
 ```
 
-Release 标签默认为 `v` + `version`（如 `v1.0.0`）。大安装包通过 GitLab Generic Package 上传，Release 页面会显示下载链接。
+Release 标签默认为 `v` + `version`（如 `v1.0.0`）。大安装包通过 GitLab Generic Package 上传；`electron/docs/使用教程.md` 会写入 Release 页面描述并直接展示。
+
+仅更新教程/描述（不改安装包）：
+
+```bash
+pnpm release:docs
+```
 
 ### 版本与标签（可选）
 

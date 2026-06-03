@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   resumeExport: () => ipcRenderer.invoke('resume-export'),
   stopExport: () => ipcRenderer.invoke('stop-export'),
   openDirectory: () => ipcRenderer.invoke('open-directory'),
+  openTargetsFile: () => ipcRenderer.invoke('open-targets-file'),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   onExportProgress: (callback) => {

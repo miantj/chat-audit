@@ -15,7 +15,7 @@ metadata:
 
 一手 is a clothing wholesale platform. CS talks to shop owners on WeChat. The CRM **chat audit** page only shows one conversation at a time; this skill drives **bulk export** via Chrome CDP + Node.
 
-**Domain model:** Employee (main table row) → effective metric customer IDs (`总有效跟进好友数（人天）`, `总有效咨询好友数（人天）`) → searched external friend → Conversation (messages in `ww-open-data-frame` iframe). With `--all-customers` / `--no-effective-filter`, the exporter instead walks every `沟通内容` / `外部好友` entry for each employee. **Direction:** `left` / customer → `role: "customer"`; `right` / employee → `role: "official"`.
+**Domain model:** Employee (main table row) → effective metric customer IDs (`总有效跟进好友数（人天）`, `总有效咨询好友数（人天）`) → searched external friend → Conversation (messages in `ww-open-data-frame` iframe). With `--all-customers` / `--no-effective-filter`, the exporter instead walks every `沟通内容` / `外部好友` entry for each employee. With `--targets-file`, it reads Excel/CSV `负责人` + `外部客户ID` pairs, matches owners by normalized exact name, skips metric discovery, and searches only the listed customer IDs. **Direction:** `left` / customer → `role: "customer"`; `right` / employee → `role: "official"`.
 
 **Dataset shape** (one object per conversation): `conversation_id`, `employee_name`, `customer_name`, `started_at`, `ended_at`, `message_count`, `messages[]` (with `attachments`, `meta`), `source_meta`. Message export is date-bounded: after selecting a customer, the script scrolls the message area forward until it reaches the first message after the requested date range, then saves only messages inside the range. `source_meta` records the message date bounds, filtered count, observed count, and scroll stop reason. Export artifacts belong in the caller's workspace `exports/` directory, not in the skill install directory.
 
@@ -43,10 +43,13 @@ metadata:
 |--------|------|
 | `scripts/crm-preflight.py` | CDP: login, dates, department, **diagnose-state**, **gate-start-export**, **gate-check**, **gate-wecom** (subcommands) |
 | `scripts/lib/cdp-bootstrap.mjs` | CDP URL probe + cold-start Chrome (no pkill); used by `export-with-self-heal.mjs` |
-| `scripts/start-export.mjs` | **一键导出**（等同 Electron「开始导出」：CDP → `prepare-export` → `export-with-self-heal`） |
-| `scripts/export-date-range.js` | Bulk export for `--start` / `--end` (`--retry-failed`, `--fast`) |
+| `scripts/export-date-range.js` | Bulk export for `--start` / `--end` |
+| `scripts/export-target-list-by-day.mjs` | Target-list date range export, one CRM search date per day |
+| `scripts/merge-daily-exports.js` | Merge daily target-list JSON/JSONL files locally |
+| `scripts/parse-target-list.py` | Excel/CSV target-list parser for `--targets-file` |
 | `scripts/reconcile.js` | JSONL → deduped dataset JSON |
-| `scripts/json-to-csv-business.js` | Business CSV + `transcript` column |
+| `scripts/json-to-csv-business.js` | Business CSV + `transcript` column; can split by message date |
+| `scripts/json-to-llm-chunks.js` | Local JSON/JSONL post-processing into LLM-friendly JSONL chunks |
 
 Preflight deps: `pip install -r scripts/requirements-preflight.txt`.
 
@@ -65,7 +68,7 @@ Progress:
 - [ ] Gate Start: `gate-start-export` exit 0 (or use `export-with-self-heal.mjs`, which runs it for you)
 - [ ] Step 4: `export-with-self-heal.mjs` (self-iteration enabled) or plain `export-date-range.js`
 - [ ] Step 5 (optional): `reconcile.js`
-- [ ] Step 5b: Business CSV — **auto-generated** by `export-with-self-heal.mjs` as `{basename}.business.csv` (or run `json-to-csv-business.js` manually)
+- [ ] Step 5b (optional): `json-to-csv-business.js`
 - [ ] Step 6: Generate report ([references/report-template.md](references/report-template.md))
 - [ ] Step 7: Leave the debug Chrome open for the next export. Do **not** close, quit, Ctrl-C, or otherwise stop the browser after a successful run; only close script/CDP websocket connections.
 
@@ -74,26 +77,6 @@ Work from a writable task/project workspace, not from the skill install director
 ```bash
 cd /path/to/chat-audit-export
 ```
-
-### 一键导出（CLI，等同 Electron「开始导出」）
-
-专用 Chrome（`~/.chrome-chat-audit-profile`，CDP `9222`）中已登录 CRM 后：
-
-```bash
-# 在 skill 目录内（默认导出昨天 → 上级工作区 ../exports/chat-audit-YYYY-MM-DD.json）
-node scripts/start-export.mjs
-
-# 或从 monorepo 根目录
-pnpm export
-
-# 指定日期与输出目录
-node scripts/start-export.mjs --start=2026-05-21 --output-dir=/path/to/exports
-
-# 可执行入口（需 chmod +x bin/chat-audit-export）
-./bin/chat-audit-export --help
-```
-
-流程：`ensureCdpReady` → `prepare-export`（部门/日期/门禁）→ `export-with-self-heal.mjs`（自愈、失败补跑、`.business.csv`）。默认日期为**昨天**（本地时区），与桌面端一致。
 
 If the skill is installed elsewhere, invoke the installed scripts by absolute path from the task workspace, or set `CHAT_AUDIT_EXPORT_DIR` / pass `--out` to a workspace-owned directory. The scripts refuse to write output inside a detected skill directory.
 
@@ -172,13 +155,65 @@ node scripts/export-with-self-heal.mjs \
   --start=YYYY-MM-DD \
   --end=YYYY-MM-DD \
   --keywords= \
+  --max=2000 \
+  --skip-date-validation
+```
+
+Use a larger `--max` for true all-customer exports; the default is 2000 conversations.
+
+For Excel/CSV target-list exports, use `--targets-file`. The file must contain
+`负责人` and `外部客户ID` columns. `.xlsx` reads the first sheet unless
+`--targets-sheet=Sheet1` is provided. Owner matching is normalized exact
+matching: whitespace is ignored, but substring matching is not used.
+
+For target-list ranges longer than one day, **prefer the daily runner**. The CRM
+external-friend search is scoped by the main table date; if the page date is
+May 1, a customer who only chatted on May 2 may not appear in search. The daily
+runner sets the CRM date separately for each day, scans that day's visible
+external-friend list, intersects it with the target list, exports only matched
+customers, and merges the daily outputs locally. This avoids waiting on hundreds
+of target customers who simply did not chat on that specific day.
+
+```bash
+node scripts/export-target-list-by-day.mjs \
+  --start=2026-05-01 \
+  --end=2026-05-31 \
+  --targets-file=/path/to/list.xlsx \
+  --out-dir=exports/target-list-by-day-2026-05 \
+  --basename=chat-audit-target-list-2026-05 \
+  --max=20000 \
+  --fast-paced
+```
+
+If the old one-ID-at-a-time search behavior is needed, pass
+`--target-list-strategy=search`; the default is `visible`.
+
+Merged outputs:
+
+```text
+exports/target-list-by-day-2026-05/chat-audit-target-list-2026-05-merged.json
+exports/target-list-by-day-2026-05/chat-audit-target-list-2026-05-merged.jsonl
+```
+
+The merge combines messages from the same `客服 + 客户ID` across days. It also
+keeps `progress.failed_daily_conversation_ids` with `__date_YYYY-MM-DD` suffixes,
+so a customer that failed on one day but succeeded on another is not treated as
+a final month-level failure.
+
+```bash
+node scripts/export-with-self-heal.mjs \
+  --start=YYYY-MM-DD \
+  --end=YYYY-MM-DD \
+  --targets-file=/path/to/list.xlsx \
+  --max=2000 \
   --skip-date-validation
 ```
 
 Default output when `--out` is omitted:
 
 ```text
-$PWD/exports/chat-audit-YYYY-MM-DD.json
+effective customers: $PWD/exports/chat-audit-YYYY-MM-DD.json
+all customers:       $PWD/exports/chat-audit-all-customers-YYYY-MM-DD.json
 ```
 
 Output resolution order:
@@ -186,7 +221,7 @@ Output resolution order:
 1. `--out=/absolute/or/relative/file.json`
 2. `OUTPUT_PATH=/absolute/or/relative/file.json`
 3. `CHAT_AUDIT_EXPORT_DIR=/path/to/exports`
-4. `$PWD/exports/chat-audit-YYYY-MM-DD.json`
+4. `$PWD/exports/chat-audit-YYYY-MM-DD.json` for effective-customer exports, or `$PWD/exports/chat-audit-all-customers-YYYY-MM-DD.json` for all-customer exports
 
 Relative `--out` paths resolve from the caller's current workspace. Do not use a path inside `.agents/skills/chat-audit-export`, `$CODEX_HOME/skills/chat-audit-export`, or any installed skill directory.
 
@@ -196,11 +231,9 @@ The wrapper script:
 3. Diagnoses page state on failure before choosing recovery
 4. Detects blocking error type from `export-error` output and diagnosed state
 5. Attempts self-heal (tab reopen / cascader cleanup / page reload — **not** killing Chrome when CDP is up) for self-healable errors
-6. Retries up to 2 times for the same error type
-7. Writes lesson notes to `docs/solutions/integration-issues/chat-audit-self-iter-YYYY-MM-DD.md` after 2 failures
+6. Retries up to 3 times for the same error type
+7. Writes lesson notes to `docs/solutions/integration-issues/chat-audit-self-iter-YYYY-MM-DD.md` after 3 failures
 8. For `WXWORK_LOGIN_EXPIRED` (selected customer shows WeCom login), stops immediately without CDP “restart” self-heal.
-9. After a successful pass, if `failed_conversation_ids` is non-empty, automatically runs up to **2** failed-list retries with `--retry-failed --fast` (Electron uses the same wrapper). **Pass 1** uses the same path as the main export (`沟通内容` → `外部好友` search). **Pass 2** uses **metric-table direct** (`goToContent` / 「聊天内容」 on the metric row, with search as fallback). Pass count is persisted in `chat-audit-YYYY-MM-DD.failed-retry-meta.json` next to the JSON so repeated「开始导出」does not reset the budget. Delete that meta file (or run a full export without `--retry-failed`) to reset. Stops after 2 failed-list retries even if some IDs remain failed.
-10. After all passes finish (including failed retries), runs `json-to-csv-business.js` → `chat-audit-YYYY-MM-DD.business.csv` next to the JSON (uses JSONL when JSON > ~30MB).
 
 **Handling enterprise WeChat login expiry (WXWORK_LOGIN_EXPIRED):**
 - **Never navigate to `work.weixin.qq.com`, `wxwork.com`, or any standalone WeCom login page.**
@@ -226,7 +259,7 @@ node scripts/export-date-range.js \
 
 `--skip-date-validation`: dialog date filter may not match Vue-set main table; export still scopes by `--start`/`--end`.
 
-**Paced export:** Full exports enable paced mode by default to reduce page pressure and protect checkpoint progress. When paced is on, **search / friend select / message scroll** use **DOM-driven waits** (poll until results, iframe, or message DOM change) instead of fixed sleeps. Tiny samples (`--max=1 --max-rows=1`) run fast unless `--paced` is passed. Use `--no-paced` only for short debugging. Tunables:
+**Paced export:** Full exports enable paced delays by default to reduce page pressure and protect checkpoint progress. Tiny samples (`--max=1 --max-rows=1`) run fast unless `--paced` is passed. Use `--fast-paced` for day-to-day bulk exports when you want a faster DOM-driven mode; it keeps the safer small-step message scrolling but waits for real DOM/message changes instead of long fixed sleeps. Use `--no-paced` only for short debugging. Tunables:
 
 ```bash
 CUSTOMER_DELAY_MIN_MS=1000
@@ -235,13 +268,19 @@ CUSTOMERS_PER_BATCH=10
 EMPLOYEE_DELAY_MIN_MS=5000
 EMPLOYEE_DELAY_MAX_MS=5000
 BATCH_REST_MS=5000
-DOM_POLL_INTERVAL_MS=150
-DOM_SEARCH_READY_TIMEOUT_MS=4000
-DOM_SELECT_READY_TIMEOUT_MS=5000
-DOM_MESSAGE_CHANGE_TIMEOUT_MS=1200
+SEARCH_RESULT_DELAY_MIN_MS=1500
+SEARCH_RESULT_DELAY_MAX_MS=4000
+SELECT_FRIEND_DELAY_MIN_MS=2000
+SELECT_FRIEND_DELAY_MAX_MS=5000
+MESSAGE_SCROLL_DELAY_MIN_MS=1500
+MESSAGE_SCROLL_DELAY_MAX_MS=4000
+FAST_DOM_POLL_INTERVAL_MS=150
+FAST_SEARCH_READY_TIMEOUT_MS=4000
+FAST_SELECT_READY_TIMEOUT_MS=5000
+FAST_MESSAGE_DOM_CHANGE_TIMEOUT_MS=1200
 ```
 
-Customer/employee/batch delays remain short fixed rests for anti rate-limit spacing only.
+Fast-paced defaults are shorter (`customer=300-800ms`, `employee=1000-1500ms`, `batch=20/1000ms`, `search=600-1200ms`, `select=900-1800ms`, `messageScroll=600-1200ms`) and may still be overridden by the environment variables above.
 
 If the page shows `请求过于频繁` / similar frequency warnings, export stops with `RATE_LIMITED`, saves JSON/checkpoint, and should be resumed later from the same output path.
 
@@ -250,6 +289,12 @@ If the page shows `请求过于频繁` / similar frequency warnings, export stop
 2. Clicks `总有效咨询好友数（人天）`, paginates the metric table, and extracts customer IDs from `客户信息`.
 3. Deduplicates customers by employee + customer ID while preserving both metric categories in metadata.
 4. Switches back to `沟通内容` / `外部好友`, searches the customer ID, selects the exact matching result, then extracts the conversation using the existing iframe logic.
+
+With `--targets-file`, the exporter skips metric categories and uses the
+Excel/CSV list as the customer source. Each exported conversation records
+`source_meta.source_metric_categories=["target_file"]`; `metric_rows` contains
+the source file path, sheet, row number, owner, and customer ID. Owners in the
+file that are not found in the CRM main table are logged as unmatched.
 
 To export every customer instead, add `--all-customers` or `--no-effective-filter`. In that mode the exporter switches to `沟通内容` / `外部好友`, paginates the full friend list, clicks each friend, and records friend-page checkpoints instead of metric checkpoints.
 
@@ -267,11 +312,23 @@ node scripts/export-date-range.js \
   --max-rows=1
 ```
 
+Probe an Excel/CSV target list without exporting messages:
+
+```bash
+node scripts/export-date-range.js \
+  --start=YYYY-MM-DD \
+  --end=YYYY-MM-DD \
+  --targets-file=/path/to/list.xlsx \
+  --skip-date-validation \
+  --dry-run-targets \
+  --max-rows=2
+```
+
 **Stdout events:** `export-start`, `export-progress`, `export-complete`, `export-error` (JSON lines).
 
 **Artifacts:** `.json`, `.jsonl`, `.checkpoint.json` next to the resolved output path.
 
-**Options:** `--keywords=`, `--category=` (department text), `--max=`, `--all-customers`, `--no-effective-filter`, `--paced`, `--no-paced`. Full flags: `node scripts/export-date-range.js --help`.
+**Options:** `--keywords=`, `--targets-file=`, `--targets-sheet=`, `--category=` (department text), `--max=`, `--all-customers`, `--no-effective-filter`, `--paced`, `--fast-paced`, `--no-paced`. Full flags: `node scripts/export-date-range.js --help`.
 
 **Self-heal state file:** `/tmp/chat-audit-self-heal-state.json` — clear to start fresh.
 
@@ -290,6 +347,20 @@ node scripts/reconcile.js \
 node scripts/json-to-csv-business.js --in=./exports/chat-audit-YYYY-MM-DD.json
 # Large runs:
 node scripts/json-to-csv-business.js --in=./exports/chat-audit-YYYY-MM-DD.jsonl --out=./exports/chat-audit-YYYY-MM-DD.business.csv
+# Split a multi-day export into one CSV per message date:
+node scripts/json-to-csv-business.js --in=./exports/chat-audit-YYYY-MM-DD-to-YYYY-MM-DD.json --split-by-day
+```
+
+### Step 5c — LLM chunks (optional)
+
+Use this after the full JSON/JSONL export is complete. It is a local
+post-processing step and does not reopen CRM.
+
+```bash
+node scripts/json-to-llm-chunks.js \
+  --in=./exports/chat-audit-YYYY-MM-DD-to-YYYY-MM-DD.json \
+  --by=day,employee \
+  --max-conversations=50
 ```
 
 ### Step 6 — Report
@@ -340,13 +411,13 @@ The `export-with-self-heal.mjs` wrapper adds automatic retry and self-improvemen
 | Error type | Self-healable | Max retries |
 |---|---|---|
 | `WXWORK_LOGIN_EXPIRED` | ❌ Human required | — |
-| `CDP_NO_TARGET` | ✅ Restart Chrome CDP | 2 |
-| `CASCADER_STUCK_OPEN` | ✅ Remove dropdown DOM | 2 |
-| `EXPORT_PAGE_CRASH` | ✅ Reload + re-apply filters | 2 |
-| `DATE_PICKER_STUCK` | ✅ Just retry | 2 |
+| `CDP_NO_TARGET` | ✅ Reopen audit tab / cold-start only if CDP is down; do not kill Chrome | 3 |
+| `CASCADER_STUCK_OPEN` | ✅ Remove dropdown DOM | 3 |
+| `EXPORT_PAGE_CRASH` | ✅ Reload + re-apply filters | 3 |
+| `DATE_PICKER_STUCK` | ✅ Just retry | 3 |
 | `UNKNOWN` | ⚠️ May retry | 2 |
 
-After 2 consecutive failures of the same type, the script:
+After 3 consecutive failures of the same type, the script:
 1. Writes lesson notes to `docs/solutions/integration-issues/chat-audit-self-iter-YYYY-MM-DD.md`
 2. Exits with code 1 and a summary
 3. Clears retry state so next run starts fresh
@@ -359,5 +430,6 @@ After 2 consecutive failures of the same type, the script:
 node scripts/export-date-range.js --help
 node scripts/reconcile.js --help
 node scripts/json-to-csv-business.js --help
+node scripts/json-to-llm-chunks.js --help
 python3 scripts/crm-preflight.py --help
 ```

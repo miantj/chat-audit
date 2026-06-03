@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { exportCurrentPage } from './export-current-page.js';
 import { getDefaultCheckpointPath } from './lib/checkpoint.js';
 import { resolveExportOutputPath } from './lib/export-path.js';
+import { loadTargetList } from './lib/target-list.js';
 import {
   applyFailedRetryPassEnv,
   FAILED_RETRY_MAX,
@@ -41,12 +42,17 @@ function showUsage() {
     '  --keywords=name1,name2  Employee name keywords (default: 小米,丽丽,农农,可可)',
     '  --max=2000              Max conversations to export',
     '  --max-rows=50           Max employee rows to process',
-    '  --out=./data.json       Output dataset path (default: $PWD/exports/chat-audit-YYYY-MM-DD.json)',
+    '  --out=./data.json       Output dataset path (default effective: $PWD/exports/chat-audit-YYYY-MM-DD.json; all customers: chat-audit-all-customers-YYYY-MM-DD.json)',
+    '  --targets-file=./list.xlsx  Excel/CSV list with 负责人 and 外部客户ID columns',
+    '  --targets-sheet=Sheet1   Worksheet name for --targets-file .xlsx inputs (default: first sheet)',
+    '  --target-list-strategy=search|visible',
+    '                         target-list mode: search every ID, or scan visible daily friends first',
     '  --category=xxx          Expected category filter text',
     '  --tab=xxx               Expected active tab text',
     '  --all-customers         Export every external friend instead of only effective metric customers',
     '  --no-effective-filter   Alias for --all-customers',
     '  --paced                 Enable paced export delays for small samples',
+    '  --fast-paced            Enable DOM-driven fast paced delays for full exports',
     '  --no-paced              Disable paced export delays',
     '  --dry-run-targets       Probe metric categories and print target customer IDs without exporting messages',
     '  --retry-failed          Re-export only previously failed conversations from existing output',
@@ -102,6 +108,10 @@ const cwd = process.cwd();
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const maybeSkillRoot = path.dirname(scriptDir);
 const skillRoot = fs.existsSync(path.join(maybeSkillRoot, 'SKILL.md')) ? maybeSkillRoot : '';
+const targetsFile = typeof opts['targets-file'] === 'string'
+  ? path.resolve(cwd, opts['targets-file'])
+  : '';
+const targetsSheet = typeof opts['targets-sheet'] === 'string' ? opts['targets-sheet'].trim() : '';
 
 function isPathInside(child, parent) {
   if (!parent) return false;
@@ -109,8 +119,16 @@ function isPathInside(child, parent) {
   return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
-const customerSelectionMode =
-  opts['all-customers'] === true || opts['no-effective-filter'] === true ? 'all' : 'effective';
+const customerSelectionMode = targetsFile
+  ? 'target-list'
+  : opts['all-customers'] === true || opts['no-effective-filter'] === true
+    ? 'all'
+    : 'effective';
+
+if (targetsFile && (opts['all-customers'] === true || opts['no-effective-filter'] === true)) {
+  console.error('Error: --targets-file cannot be combined with --all-customers or --no-effective-filter.');
+  process.exit(1);
+}
 
 const outputPath = resolveExportOutputPath(opts.out, { cwd, dateStart, customerSelectionMode });
 if (isPathInside(outputPath, skillRoot)) {
@@ -146,6 +164,16 @@ const targetKeywords = (
   .map((s) => s.trim())
   .filter(Boolean);
 
+let targetList = null;
+if (targetsFile) {
+  try {
+    targetList = await loadTargetList(targetsFile, { sheetName: targetsSheet });
+  } catch (error) {
+    console.error(`Error: ${error.message || String(error)}`);
+    process.exit(1);
+  }
+}
+
 // Graceful shutdown state
 let shutdownRequested = false;
 const PAUSE_FILE =
@@ -167,6 +195,15 @@ const expectedCategory = (opts.category || '').trim();
 const expectedActiveTab = (opts.tab || '').trim();
 const skipDateValidation = opts['skip-date-validation'] === true;
 const dryRunTargets = opts['dry-run-targets'] === true;
+const targetListStrategy = String(opts['target-list-strategy'] || opts['targets-strategy'] || 'search').trim();
+if (targetListStrategy && !['search', 'visible'].includes(targetListStrategy)) {
+  console.error('Error: --target-list-strategy must be search or visible.');
+  process.exit(1);
+}
+if (opts['fast-paced'] === true && opts['no-paced'] === true) {
+  console.error('Error: --fast-paced and --no-paced are mutually exclusive.');
+  process.exit(1);
+}
 const retryFailed = opts['retry-failed'] === true;
 if (retryFailed) {
   process.env.CHAT_AUDIT_RETRY_FAILED = '1';
@@ -200,7 +237,8 @@ if (fastMode) {
 const paced =
   opts['no-paced'] === true
     ? false
-    : (opts.paced === true || (!dryRunTargets && !(maxConversations <= 1 && maxRows <= 1)));
+    : (opts['fast-paced'] === true || opts.paced === true || (!dryRunTargets && !(maxConversations <= 1 && maxRows <= 1)));
+const paceProfile = opts['fast-paced'] === true ? 'fast' : 'standard';
 
 let retryFailedConversations = null;
 if (retryFailed) {
@@ -283,9 +321,15 @@ console.log(JSON.stringify({
   checkpointPath,
   jsonlPath,
   targetKeywords,
+  targetListPath: targetList?.filePath || null,
+  targetListSheet: targetList?.sheetName || null,
+  targetListTargetCount: targetList?.targetCount || 0,
+  targetListOwnerCount: targetList?.ownerCount || 0,
+  targetListStrategy: targetList ? targetListStrategy : null,
   maxConversations,
   customerSelectionMode,
-  paced
+  paced,
+  paceProfile
 }, null, 2));
 
 try {
@@ -296,6 +340,8 @@ try {
     dateStart,
     dateEnd,
     targetKeywords,
+    targetList,
+    targetListStrategy,
     customerSelectionMode,
     maxConversations,
     maxRows,
@@ -304,6 +350,7 @@ try {
     skipDateValidation,
     dryRunTargets,
     paced,
+    paceProfile,
     retryFailedConversations,
     shutdownRequested: () => shutdownRequested,
     pauseFile: PAUSE_FILE,

@@ -27,8 +27,14 @@ export function countFailedConversations(outputPath) {
   return countFailedFromLib(outputPath, getBundledNodeBin());
 }
 
-export function resolveExportJsonPath(outputDir, start, allCustomers = false) {
-  const prefix = allCustomers ? 'chat-audit-all-customers' : 'chat-audit';
+export function resolveExportJsonPath(outputDir, start, options = {}) {
+  const allCustomers = Boolean(options.allCustomers);
+  const targetList = Boolean(options.targetList);
+  const prefix = allCustomers
+    ? 'chat-audit-all-customers'
+    : targetList
+      ? 'chat-audit-target-list'
+      : 'chat-audit';
   return path.resolve(outputDir, `${prefix}-${start}.json`);
 }
 
@@ -114,7 +120,8 @@ export function runExportEngine(options, eventEmitter) {
   const nodeRunner = path.join(scriptsDir, 'export-with-self-heal.mjs');
   const nodeBin = getBundledNodeBin();
   const allCustomers = Boolean(options.allCustomers);
-  const outputPath = resolveExportJsonPath(outputDir, start, allCustomers);
+  const targetList = Boolean(options.targetsFile);
+  const outputPath = resolveExportJsonPath(outputDir, start, { allCustomers, targetList });
   const expectDept = options.department || '大客私域顾问-总';
 
   const runnerArgs = [
@@ -127,6 +134,14 @@ export function runExportEngine(options, eventEmitter) {
   ];
   if (allCustomers) {
     runnerArgs.push('--all-customers');
+  }
+  if (options.targetsFile) {
+    runnerArgs.push(`--targets-file=${options.targetsFile}`);
+    if (options.targetsSheet) {
+      runnerArgs.push(`--targets-sheet=${options.targetsSheet}`);
+    }
+    const strategy = options.targetListStrategy || 'visible';
+    runnerArgs.push(`--target-list-strategy=${strategy}`);
   }
 
   const failedCount = countFailedConversations(outputPath);
@@ -392,4 +407,134 @@ export function runExportEngine(options, eventEmitter) {
   });
 
   return { proc, done, outputPath };
+}
+
+/**
+ * 目标名单跨日期导出：按天跑批 + 本地合并（export-target-list-by-day.mjs）。
+ */
+export function runTargetListByDayEngine(options, eventEmitter) {
+  const start = options.start ?? options.startDate;
+  const end = options.end ?? options.endDate;
+  const outputDir = options.outputDir;
+  const basename = options.basename || 'chat-audit-target-list';
+  const outDir =
+    options.outDir ||
+    path.join(outputDir, `target-list-by-day-${start}_${end}`);
+  const mergedOut = path.join(outDir, `${basename}-merged.json`);
+
+  const scriptsDir = getScriptsDir();
+  const skillRoot = getSkillRoot();
+  const nodeRunner = path.join(scriptsDir, 'export-target-list-by-day.mjs');
+  const nodeBin = getBundledNodeBin();
+  const expectDept = options.department || '大客私域顾问-总';
+
+  const runnerArgs = [
+    nodeRunner,
+    `--start=${start}`,
+    `--end=${end}`,
+    `--targets-file=${options.targetsFile}`,
+    `--out-dir=${outDir}`,
+    `--basename=${basename}`,
+    '--self-heal-wrapper'
+  ];
+  if (options.targetsSheet) {
+    runnerArgs.push(`--targets-sheet=${options.targetsSheet}`);
+  }
+  const strategy = options.targetListStrategy || 'visible';
+  runnerArgs.push(`--target-list-strategy=${strategy}`);
+  runnerArgs.push(`--expect-dept=${expectDept}`);
+
+  const exportEnv = {
+    ...process.env,
+    ...MODERATE_PACED_ENV,
+    ...runtimeExportEnv(),
+    CHAT_AUDIT_CRM_CDP_BASE: DEFAULT_CDP,
+    CHAT_AUDIT_PAUSE_FILE: PAUSE_FILE,
+    CHAT_AUDIT_STOP_FILE: STOP_FILE,
+    CHAT_AUDIT_EXPECT_DEPT: expectDept,
+    CHAT_AUDIT_START_GATE_DONE: '1',
+    CHAT_AUDIT_CALLER_CWD: path.resolve(outputDir),
+    CHAT_AUDIT_EXPORT_DIR: path.resolve(outputDir)
+  };
+
+  const proc = spawn(nodeBin, runnerArgs, {
+    cwd: skillRoot,
+    env: exportEnv,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  let stdoutBuf = '';
+  let stderrBuf = '';
+  let lineBuf = '';
+
+  const handleLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    if (
+      trimmed.startsWith('[') ||
+      trimmed.startsWith('===') ||
+      trimmed.startsWith('Export ') ||
+      trimmed.startsWith('✅') ||
+      trimmed.startsWith('Warning:') ||
+      trimmed.startsWith('Output:')
+    ) {
+      eventEmitter.emit('progress', {
+        current: 0,
+        total: -1,
+        message: trimmed
+      });
+    }
+  };
+
+  const feedChunk = (chunk, isStdout) => {
+    const text = chunk.toString('utf8');
+    if (isStdout) stdoutBuf += text;
+    else stderrBuf += text;
+    lineBuf += text;
+    const parts = lineBuf.split('\n');
+    lineBuf = parts.pop() || '';
+    parts.forEach(handleLine);
+  };
+
+  proc.stdout.on('data', (chunk) => feedChunk(chunk, true));
+  proc.stderr.on('data', (chunk) => feedChunk(chunk, false));
+
+  const done = new Promise((resolve, reject) => {
+    proc.on('error', (err) => {
+      reject(
+        new Error(`无法启动按天目标名单导出（export-target-list-by-day.mjs）：${err.message}`)
+      );
+    });
+    proc.on('close', (code) => {
+      if (lineBuf.trim()) handleLine(lineBuf.trim());
+      if (code === 0) {
+        let conversationCount = 0;
+        try {
+          conversationCount = countExportedConversations(mergedOut);
+        } catch (err) {
+          reject(err);
+          return;
+        }
+        resolve({
+          outputPath: mergedOut,
+          csvPath: null,
+          code,
+          conversationCount,
+          failed: 0,
+          shutdown: false,
+          employeeProgressCurrent: 0,
+          employeeProgressTotal: 0,
+          progressUnit: 'employee',
+          outDir
+        });
+      } else {
+        const logText = (stderrBuf || stdoutBuf).trim();
+        reject(
+          new Error(`按天目标名单导出失败 (exit ${code})\n${logText}`.slice(0, 1200))
+        );
+      }
+    });
+  });
+
+  return { proc, done, outputPath: mergedOut };
 }

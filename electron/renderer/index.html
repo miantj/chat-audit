@@ -36,14 +36,46 @@
         </div>
 
         <div class="form-group">
+          <label>导出模式</label>
+          <div class="export-mode-row">
+            <label class="inline-check">
+              <input type="radio" name="exportMode" value="effective" checked>
+              有效指标客户（默认）
+            </label>
+            <label class="inline-check">
+              <input type="radio" name="exportMode" value="all">
+              全部外部好友
+            </label>
+            <label class="inline-check">
+              <input type="radio" name="exportMode" value="targetList">
+              目标名单（Excel/CSV）
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group target-list-section is-hidden" id="targetListSection">
+          <label for="targetsFile">目标名单文件</label>
+          <p class="field-hint">须含「负责人」「外部客户ID」列；跨多日时将按天导出并自动合并</p>
+          <div class="input-with-button">
+            <input type="text" id="targetsFile" readonly placeholder="选择 .xlsx 或 .csv 文件">
+            <button type="button" id="selectTargetsFile" class="btn-secondary">选择</button>
+          </div>
+          <div class="target-list-options">
+            <label for="targetsSheet">工作表（可选）</label>
+            <input type="text" id="targetsSheet" placeholder="留空则读取第一个工作表">
+            <label for="targetListStrategy">匹配策略</label>
+            <select id="targetListStrategy">
+              <option value="visible">可见好友交集（推荐，跨日期更快）</option>
+              <option value="search">逐个 ID 搜索</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group">
           <label for="department">部门</label>
           <select id="department">
             <option value="大客私域顾问-总">大客私域顾问-总</option>
           </select>
-          <label class="inline-check">
-            <input type="checkbox" id="allCustomers">
-            导出所有外部好友（不限「有效指标」客户，耗时更长）
-          </label>
         </div>
 
         <div class="form-group">

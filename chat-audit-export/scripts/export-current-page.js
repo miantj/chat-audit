@@ -33,6 +33,7 @@ import {
   upsertDatasetConversation
 } from './lib/dataset.js';
 import { getDomPaceConfig } from './lib/dom-pace-config.js';
+import { groupTargetsByOwner, normalizeOwnerName, TARGET_FILE_CATEGORY } from './lib/target-list.js';
 
 let WAIT_MS = 1200;
 let STABLE_POLL_MS = 1200;
@@ -81,7 +82,7 @@ function emitExportControlEvent(log, event, message) {
 /** 仅扫主表行数，不打开员工弹窗 */
 async function countPlannedEmployees(
   pageClient,
-  { checkpoint, targetKeywords, maxRows }
+  { checkpoint, targetKeywords, maxRows, exportTargetList = false, targetListByOwner = null }
 ) {
   let total = 0;
   let checkpointReached = !checkpoint.employee_name;
@@ -102,12 +103,13 @@ async function countPlannedEmployees(
       mainPager = await getMainPager(pageClient);
     }
     const summaries = await getRowSummaries(pageClient);
-    const rows =
-      targetKeywords.length > 0
+    const rows = exportTargetList
+      ? summaries.filter((row) => targetListByOwner.has(normalizeOwnerName(row.employeeName)))
+      : (targetKeywords.length > 0
         ? summaries.filter((row) =>
             targetKeywords.some((keyword) => row.employeeName.includes(keyword))
           )
-        : summaries;
+        : summaries);
 
     for (const row of rows) {
       if (processedRowCount >= maxRows) {
@@ -1144,6 +1146,84 @@ async function switchToCommunicationExternalFriends(pageClient) {
   return { ok: category.ok && tab.ok && searchReady, category, tab, searchReady };
 }
 
+async function clearExternalFriendSearch(pageClient) {
+  const result = await evalJson(
+    pageClient,
+    `(() => {
+      const dialog = ${visibleDialogExpr};
+      if (!dialog) return { ok: false, reason: 'dialog-missing' };
+      const inputs = Array.from(dialog.querySelectorAll('input'));
+      const input =
+        inputs.find((el) => /搜索好友|好友昵称|备注/.test(el.getAttribute('placeholder') || '')) ||
+        inputs.find((el) => !/年|月|日|date|YYYY/i.test(el.getAttribute('placeholder') || '') && el.type !== 'hidden');
+      if (!input) return { ok: false, reason: 'search-input-missing' };
+      input.focus();
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(input, '');
+      else input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      const suffix = input.closest('.el-input')?.querySelector('.el-input__suffix, .el-input__suffix-inner, .el-icon-search');
+      const searchIcon = suffix?.querySelector('.el-icon-search, [class*="search"]') || suffix;
+      if (searchIcon) searchIcon.click();
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+      return { ok: true, clickedSearchIcon: !!searchIcon };
+    })()`
+  );
+  await sleep(500);
+  return result;
+}
+
+async function clickFriendItemByCustomerId(pageClient, customerId) {
+  return evalJson(
+    pageClient,
+    `(() => {
+      const dialog = ${visibleDialogExpr};
+      const isVisible = (el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const items = Array.from(dialog?.querySelectorAll('.friend-li') || []).filter(isVisible);
+      const target = items.find((el) => (el.innerText || el.textContent || '').includes(${JSON.stringify(customerId)}));
+      if (!target) {
+        return {
+          ok: false,
+          reason: 'friend-missing',
+          available: items.map((el) => (el.innerText || el.textContent || '').replace(/\\n+/g, ' | ').trim()).slice(0, 5)
+        };
+      }
+      target.scrollIntoView({ block: 'center' });
+      target.click();
+      return {
+        ok: true,
+        text: (target.innerText || '').replace(/\\n+/g, ' | ').trim()
+      };
+    })()`
+  );
+}
+
+function buildTargetListTarget(rawTarget, employeeName) {
+  return {
+    ...rawTarget,
+    employeeName,
+    metricCategory: TARGET_FILE_CATEGORY,
+    sourceMetricCategories: [TARGET_FILE_CATEGORY],
+    friendPage: rawTarget.friendPage ?? null,
+    friendIndex: rawTarget.friendIndex ?? null
+  };
+}
+
+function buildTargetMapByCustomerId(targets, employeeName) {
+  const map = new Map();
+  for (const target of targets || []) {
+    if (!target.customerId) continue;
+    map.set(String(target.customerId), buildTargetListTarget(target, employeeName));
+  }
+  return map;
+}
+
 /** 指标表行直达聊天（goToContent / 「聊天内容」），用于补跑第 2 轮 */
 async function openChatFromMetricTableRow(pageClient, target, { postOpenSleep = true } = {}) {
   const metricCategory =
@@ -2111,6 +2191,8 @@ export async function exportCurrentPage({
   dateStart,
   dateEnd,
   targetKeywords,
+  targetList = null,
+  targetListStrategy = 'search',
   customerSelectionMode = 'effective',
   maxConversations = 2000,
   maxRows = 999999,
@@ -2165,12 +2247,23 @@ export async function exportCurrentPage({
     );
   }
   const exportAllCustomers = customerSelectionMode === 'all';
+  const exportTargetList = customerSelectionMode === 'target-list';
+  const targetListVisibleStrategy = exportTargetList && targetListStrategy === 'visible';
+  const targetListByOwner = exportTargetList ? groupTargetsByOwner(targetList) : new Map();
+  const matchedTargetOwnerKeys = new Set();
   let checkpoint = await loadCheckpoint(checkpointPath);
+  const loadedCheckpoint = { ...checkpoint };
   const clearMetricCheckpoint =
     process.env.CHAT_AUDIT_CLEAR_METRIC_CHECKPOINT === '1' ||
     process.env.CHAT_AUDIT_FULL_EXPORT === '1';
   if (isRetryFailedPass) {
     checkpoint = createEmptyCheckpoint();
+  } else if (exportTargetList && targetListVisibleStrategy) {
+    if (loadedCheckpoint.employee_name) {
+      log('[checkpoint] target-list visible strategy ignores search checkpoint and skips already-completed conversations from dataset');
+    }
+    checkpoint = createEmptyCheckpoint();
+    await saveCheckpoint(checkpointPath, checkpoint);
   } else if (exportAllCustomers) {
     if (isMetricCheckpoint(checkpoint)) {
       log(
@@ -2196,11 +2289,14 @@ export async function exportCurrentPage({
       );
     } else if (checkpoint.employee_name) {
       log(
-        '[checkpoint] ignoring old friend-list checkpoint; starting metric-driven export from the beginning'
+        `[checkpoint] ignoring old friend-list checkpoint; starting ${exportTargetList ? 'target-list' : 'metric-driven'} export from the beginning`
       );
       checkpoint = createEmptyCheckpoint();
       await saveCheckpoint(checkpointPath, checkpoint);
     }
+  }
+  if (exportTargetList) {
+    log(`[target-list] owners=${targetList?.ownerCount || 0} targets=${targetList?.targetCount || 0} strategy=${targetListStrategy} file=${targetList?.filePath || ''}`);
   }
   const pageSession = await getPageSession();
   const pageClient = pageSession.client;
@@ -2290,12 +2386,16 @@ export async function exportCurrentPage({
     progressState.totalEmployees = await countPlannedEmployees(pageClient, {
       checkpoint: emptyEmployeeCheckpoint,
       targetKeywords,
-      maxRows
+      maxRows,
+      exportTargetList,
+      targetListByOwner
     });
     const remainingEmployees = await countPlannedEmployees(pageClient, {
       checkpoint,
       targetKeywords,
-      maxRows
+      maxRows,
+      exportTargetList,
+      targetListByOwner
     });
     progressState.completedEmployeesBaseline = Math.max(
       0,
@@ -2347,11 +2447,13 @@ export async function exportCurrentPage({
       }
 
       const summaries = await getRowSummaries(pageClient);
-      const rows = targetKeywords.length > 0
-        ? summaries.filter((row) =>
-            targetKeywords.some((keyword) => row.employeeName.includes(keyword))
-          )
-        : summaries;
+      const rows = exportTargetList
+        ? summaries.filter((row) => targetListByOwner.has(normalizeOwnerName(row.employeeName)))
+        : (targetKeywords.length > 0
+          ? summaries.filter((row) =>
+              targetKeywords.some((keyword) => row.employeeName.includes(keyword))
+            )
+          : summaries);
 
       for (const row of rows) {
         if (
@@ -2373,6 +2475,10 @@ export async function exportCurrentPage({
           continue;
         }
         processedRowCount += 1;
+        const targetOwnerKey = normalizeOwnerName(row.employeeName);
+        if (exportTargetList) {
+          matchedTargetOwnerKeys.add(targetOwnerKey);
+        }
 
         let rowCountedForProgress = false;
         try {
@@ -2705,6 +2811,652 @@ export async function exportCurrentPage({
             }
 
             friendPager = pageState.pager;
+          }
+          continue;
+        }
+
+        if (exportTargetList) {
+          const ownerTargets = targetListByOwner.get(targetOwnerKey) || [];
+          const targets = ownerTargets.map((target) => buildTargetListTarget(target, row.employeeName));
+          log(`[row] target-list targets ${targets.length}`);
+          if (dryRunTargets) {
+            for (const target of targets) {
+              log(
+                `[dry-run-target] employee=${row.employeeName} customer=${target.customerId} source=target_file info=${target.customerInfo}`
+              );
+            }
+            continue;
+          }
+
+          rowCountedForProgress = true;
+
+          if (targetListVisibleStrategy) {
+            const switched = await switchToCommunicationExternalFriends(pageClient);
+            if (!switched.ok) {
+              log('[row] skip target-list visible export error=switch-to-communication-failed');
+              continue;
+            }
+            const clearedSearch = await clearExternalFriendSearch(pageClient);
+            log(`[row] clear friend search ok=${clearedSearch.ok}`);
+
+            const targetByCustomerId = buildTargetMapByCustomerId(ownerTargets, row.employeeName);
+            let matchedVisibleCount = 0;
+            let friendPager = await getFriendPager(pageClient);
+            for (let friendPage = 1; friendPage <= friendPager.totalPages; friendPage++) {
+              if (
+                dataset.conversations.length >= maxConversations ||
+                (await shouldStopExport({ shutdownRequested, stopFile }))
+              ) {
+                break;
+              }
+
+              if (friendPage > 1) {
+                const next = await clickFriendNextPage(pageClient);
+                log(`[friend-page] next ok=${next.ok}`);
+                await sleep(WAIT_MS);
+              }
+
+              const pageState = await waitForFriendPageItems(pageClient, friendPage);
+              const friends = pageState.items || [];
+              log(`[friend-page] target-list visible page=${friendPage}/${pageState.pager.totalPages} friends=${friends.length}`);
+
+              for (const friend of friends) {
+                const customerId = extractCustomerId(friend.text);
+                if (!customerId || !targetByCustomerId.has(customerId)) {
+                  continue;
+                }
+
+                if (await shouldStopExport({ shutdownRequested, stopFile })) {
+                  log(
+                    stopFile && (await checkFileExists(stopFile))
+                      ? `[stop] 收到停止信号，保存状态并退出…`
+                      : `[shutdown] 保存状态并退出…`
+                  );
+                  await saveDataset(outputPath, dataset);
+                  return {
+                    conversations: dataset.conversations.length,
+                    completed: dataset.progress.completed_conversation_ids.length,
+                    failed: dataset.progress.failed_conversation_ids.length,
+                    outputPath,
+                    shutdown: true
+                  };
+                }
+
+                await waitWhilePaused({ pauseFile, stopFile, shutdownRequested, log });
+                if (await shouldStopExport({ shutdownRequested, stopFile })) {
+                  log(`[stop] 暂停期间收到停止，保存状态并退出…`);
+                  await saveDataset(outputPath, dataset);
+                  return {
+                    conversations: dataset.conversations.length,
+                    completed: dataset.progress.completed_conversation_ids.length,
+                    failed: dataset.progress.failed_conversation_ids.length,
+                    outputPath,
+                    shutdown: true
+                  };
+                }
+
+                if (dataset.conversations.length >= maxConversations) {
+                  break;
+                }
+
+                const target = {
+                  ...targetByCustomerId.get(customerId),
+                  friendPage,
+                  friendIndex: friend.friendIndex
+                };
+                const conversationId = `${row.employeeName}__customer_${target.customerId}`;
+                matchedVisibleCount += 1;
+                if (conversationAlreadyDone(dataset, conversationId)) {
+                  log(`[conversation] skip already completed ${conversationId}`);
+                  continue;
+                }
+
+                log(`[conversation] ${conversationId} source=${target.sourceMetricCategories.join(',')} friendPage=${target.friendPage} friendIndex=${target.friendIndex}`);
+                const conversationStartedAt = Date.now();
+                const conversationStatsStart = { ...paceStats };
+                await assertNoRateLimitForTarget({
+                  pageClient,
+                  outputPath,
+                  dataset,
+                  checkpointPath,
+                  mainPageNo,
+                  employeeName: row.employeeName,
+                  target,
+                  conversationId
+                });
+
+                const selectStartedAt = Date.now();
+                let selected =
+                  target.friendIndex != null && Number.isFinite(target.friendIndex)
+                    ? await clickFriendItem(pageClient, target.friendIndex)
+                    : null;
+                if (!selected?.ok) {
+                  selected = await clickFriendItemByCustomerId(pageClient, target.customerId);
+                }
+                addPaceStat(paceStats, 'selectWaitMsTotal', elapsedMs(selectStartedAt));
+                await assertNoRateLimitForTarget({
+                  pageClient,
+                  outputPath,
+                  dataset,
+                  checkpointPath,
+                  mainPageNo,
+                  employeeName: row.employeeName,
+                  target,
+                  conversationId
+                });
+                if (!selected.ok) {
+                  log(`[conversation] skipped customer=${target.customerId} error=${selected.reason || 'select-failed'}`);
+                  if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                    dataset.progress.failed_conversation_ids.push(conversationId);
+                  }
+                  await markConversationCheckpoint({
+                    checkpointPath,
+                    mainPageNo,
+                    employeeName: row.employeeName,
+                    metricCategory: target.metricCategory,
+                    metricPage: target.metricPage,
+                    customerId: target.customerId,
+                    friendPage: target.friendPage,
+                    friendIndex: target.friendIndex,
+                    conversationId
+                  });
+                  await saveDataset(outputPath, dataset);
+                  pacedCustomerCount += 1;
+                  await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount, paceConfig: domPaceConfig, paceStats });
+                  continue;
+                }
+
+                await pacedSleep({
+                  enabled: paced,
+                  minMs: domPaceConfig.SELECT_FRIEND_DELAY_MIN_MS,
+                  maxMs: domPaceConfig.SELECT_FRIEND_DELAY_MAX_MS,
+                  label: `after select ${target.customerId}`,
+                  log,
+                  stats: paceStats,
+                  statsKey: 'selectWaitMsTotal'
+                });
+                if (paced) {
+                  await waitForSelectedFriendReady(
+                    pageClient,
+                    pageSession.target.id,
+                    target.customerId,
+                    target.customerInfo,
+                    {
+                      timeoutMs: domPaceConfig.DOM_SELECT_READY_TIMEOUT_MS,
+                      intervalMs: domPaceConfig.DOM_POLL_INTERVAL_MS,
+                      log
+                    }
+                  );
+                }
+
+                try {
+                  const iframeClient = await getIframeClient(pageSession.target.id);
+                  try {
+                    const extracted = await waitForDateBoundedMessages(iframeClient, {
+                      dateStart,
+                      dateEnd,
+                      log,
+                      paced,
+                      domPaceConfig,
+                      pauseFile,
+                      stopFile,
+                      shutdownRequested
+                    });
+                    if (extracted.shutdown) {
+                      log(`[stop] 消息滚动期间收到停止，保存状态并退出…`);
+                      await saveDataset(outputPath, dataset);
+                      return {
+                        conversations: dataset.conversations.length,
+                        completed: dataset.progress.completed_conversation_ids.length,
+                        failed: dataset.progress.failed_conversation_ids.length,
+                        outputPath,
+                        shutdown: true
+                      };
+                    }
+                    const conversationDurationMs = elapsedMs(conversationStartedAt);
+                    addPaceStat(paceStats, 'conversationDurationMsTotal', conversationDurationMs);
+                    const conversationDomWaitMs =
+                      paceStats.messageDomWaitMsTotal - (conversationStatsStart.messageDomWaitMsTotal || 0);
+                    const conversationFallbackSleepMs =
+                      paceStats.fallbackSleepMsTotal - (conversationStatsStart.fallbackSleepMsTotal || 0);
+                    log(
+                      `[conversation] messages ${extracted.messages.length}/${extracted.totalObservedMessageCount} filtered=${extracted.filteredOutMessageCount} scrolls=${extracted.scrolls} stop=${extracted.scrollStopReason} stable=${extracted.loaded} attempts=${extracted.attempts} durationMs=${conversationDurationMs} domWaitMs=${conversationDomWaitMs} fallbackSleepMs=${conversationFallbackSleepMs}`
+                    );
+                    await assertNoRateLimitForTarget({
+                      pageClient,
+                      outputPath,
+                      dataset,
+                      checkpointPath,
+                      mainPageNo,
+                      employeeName: row.employeeName,
+                      target,
+                      conversationId
+                    });
+
+                    if (!extracted.loaded) {
+                      if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                        dataset.progress.failed_conversation_ids.push(conversationId);
+                        await saveDataset(outputPath, dataset);
+                      }
+                      await markConversationCheckpoint({
+                        checkpointPath,
+                        mainPageNo,
+                        employeeName: row.employeeName,
+                        metricCategory: target.metricCategory,
+                        metricPage: target.metricPage,
+                        customerId: target.customerId,
+                        friendPage: target.friendPage,
+                        friendIndex: target.friendIndex,
+                        conversationId
+                      });
+                      pacedCustomerCount += 1;
+                      await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount, paceConfig: domPaceConfig, paceStats });
+                      continue;
+                    }
+
+                    const conversation = convertConversationToDataset({
+                      conversationId,
+                      employee: row,
+                      friendLabel: selected.text,
+                      friendPage: target.friendPage,
+                      customerId: target.customerId,
+                      sourceCustomerInfo: target.customerInfo,
+                      sourceMetricCategories: target.sourceMetricCategories,
+                      metricRows: target.metricRows,
+                      messages: extracted.messages,
+                      messageDateStart: dateStart,
+                      messageDateEnd: dateEnd,
+                      filteredOutMessageCount: extracted.filteredOutMessageCount,
+                      scrollStopReason: extracted.scrollStopReason,
+                      scrollIncomplete: extracted.incomplete,
+                      totalObservedMessageCount: extracted.totalObservedMessageCount
+                    });
+
+                    upsertDatasetConversation(dataset, conversation);
+                    await appendJsonlRecord(jsonlPath, conversation);
+                    if (shouldFlushDataset(dataset)) {
+                      await saveDataset(outputPath, dataset);
+                    }
+                    await markConversationCheckpoint({
+                      checkpointPath,
+                      mainPageNo,
+                      employeeName: row.employeeName,
+                      metricCategory: target.metricCategory,
+                      metricPage: target.metricPage,
+                      customerId: target.customerId,
+                      friendPage: target.friendPage,
+                      friendIndex: target.friendIndex,
+                      conversationId
+                    });
+                    pacedCustomerCount += 1;
+                    await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount, paceConfig: domPaceConfig, paceStats });
+                  } finally {
+                    await iframeClient.close();
+                  }
+                } catch (error) {
+                  const message = normalizeErrorMessage(error);
+                  log(`[conversation] skipped error=${message}`);
+
+                  if (!shouldSkipConversationError(error)) {
+                    if (error instanceof RateLimitedError) {
+                      await saveRateLimitCheckpoint({
+                        outputPath,
+                        dataset,
+                        checkpointPath,
+                        mainPageNo,
+                        employeeName: row.employeeName,
+                        target,
+                        conversationId
+                      });
+                    }
+                    throw error;
+                  }
+
+                  if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                    dataset.progress.failed_conversation_ids.push(conversationId);
+                    await saveDataset(outputPath, dataset);
+                  }
+                  await markConversationCheckpoint({
+                    checkpointPath,
+                    mainPageNo,
+                    employeeName: row.employeeName,
+                    metricCategory: target.metricCategory,
+                    metricPage: target.metricPage,
+                    customerId: target.customerId,
+                    friendPage: target.friendPage,
+                    friendIndex: target.friendIndex,
+                    conversationId
+                  });
+                  pacedCustomerCount += 1;
+                  await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount, paceConfig: domPaceConfig, paceStats });
+                }
+              }
+
+              friendPager = pageState.pager;
+            }
+            log(`[row] target-list visible matched=${matchedVisibleCount}/${targets.length}`);
+            continue;
+          }
+
+          for (const target of targets) {
+            if (await shouldStopExport({ shutdownRequested, stopFile })) {
+              log(
+                stopFile && (await checkFileExists(stopFile))
+                  ? `[stop] 收到停止信号，保存状态并退出…`
+                  : `[shutdown] 保存状态并退出…`
+              );
+              await saveDataset(outputPath, dataset);
+              return {
+                conversations: dataset.conversations.length,
+                completed: dataset.progress.completed_conversation_ids.length,
+                failed: dataset.progress.failed_conversation_ids.length,
+                outputPath,
+                shutdown: true
+              };
+            }
+
+            await waitWhilePaused({ pauseFile, stopFile, shutdownRequested, log });
+            if (await shouldStopExport({ shutdownRequested, stopFile })) {
+              log(`[stop] 暂停期间收到停止，保存状态并退出…`);
+              await saveDataset(outputPath, dataset);
+              return {
+                conversations: dataset.conversations.length,
+                completed: dataset.progress.completed_conversation_ids.length,
+                failed: dataset.progress.failed_conversation_ids.length,
+                outputPath,
+                shutdown: true
+              };
+            }
+
+            if (dataset.conversations.length >= maxConversations) {
+              break;
+            }
+
+            if (
+              shouldSkipMetricCustomerBeforeCheckpoint(
+                checkpoint,
+                row.employeeName,
+                target.metricCategory,
+                target.metricPage,
+                target.customerId,
+                checkpointReached,
+                [TARGET_FILE_CATEGORY]
+              )
+            ) {
+              continue;
+            }
+
+            checkpointReached = true;
+            const conversationId = `${row.employeeName}__customer_${target.customerId}`;
+            if (conversationAlreadyDone(dataset, conversationId)) {
+              continue;
+            }
+
+            log(`[conversation] ${conversationId} source=${target.sourceMetricCategories.join(',')}`);
+            await assertNoRateLimitForTarget({
+              pageClient,
+              outputPath,
+              dataset,
+              checkpointPath,
+              mainPageNo,
+              employeeName: row.employeeName,
+              target,
+              conversationId
+            });
+
+            const switched = await switchToCommunicationExternalFriends(pageClient);
+            if (!switched.ok) {
+              log(`[conversation] skipped customer=${target.customerId} error=switch-to-communication-failed`);
+              if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                dataset.progress.failed_conversation_ids.push(conversationId);
+              }
+              await markConversationCheckpoint({
+                checkpointPath,
+                mainPageNo,
+                employeeName: row.employeeName,
+                metricCategory: target.metricCategory,
+                metricPage: target.metricPage,
+                customerId: target.customerId,
+                conversationId
+              });
+              await saveDataset(outputPath, dataset);
+              pacedCustomerCount += 1;
+              await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount, paceConfig: domPaceConfig, paceStats });
+              continue;
+            }
+
+            const searched = await searchExternalFriendByCustomerId(
+              pageClient,
+              target.customerId,
+              target.customerInfo,
+              { pollIntervalMs: paced ? domPaceConfig.DOM_POLL_INTERVAL_MS : 500 }
+            );
+            await assertNoRateLimitForTarget({
+              pageClient,
+              outputPath,
+              dataset,
+              checkpointPath,
+              mainPageNo,
+              employeeName: row.employeeName,
+              target,
+              conversationId
+            });
+            if (!searched.ok) {
+              const sampleHint = searched.sampleItems?.length
+                ? ` samples=${JSON.stringify(searched.sampleItems)}`
+                : '';
+              log(
+                `[conversation] skipped customer=${target.customerId} error=${searched.reason || 'search-failed'} terms=${JSON.stringify(searched.searchTerms || [])}${sampleHint}`
+              );
+              if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                dataset.progress.failed_conversation_ids.push(conversationId);
+              }
+              await markConversationCheckpoint({
+                checkpointPath,
+                mainPageNo,
+                employeeName: row.employeeName,
+                metricCategory: target.metricCategory,
+                metricPage: target.metricPage,
+                customerId: target.customerId,
+                conversationId
+              });
+              await saveDataset(outputPath, dataset);
+              pacedCustomerCount += 1;
+              await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount, paceConfig: domPaceConfig, paceStats });
+              continue;
+            }
+            if (paced) {
+              await waitForFriendSearchReady(
+                pageClient,
+                target.customerId,
+                target.customerInfo,
+                {
+                  timeoutMs: domPaceConfig.DOM_SEARCH_READY_TIMEOUT_MS,
+                  intervalMs: domPaceConfig.DOM_POLL_INTERVAL_MS,
+                  log
+                }
+              );
+            }
+
+            const selected = await selectSearchedFriend(
+              pageClient,
+              target.customerId,
+              searched.match?.friendIndex,
+              target.customerInfo,
+              { waitAfterSelect: !paced }
+            );
+            await assertNoRateLimitForTarget({
+              pageClient,
+              outputPath,
+              dataset,
+              checkpointPath,
+              mainPageNo,
+              employeeName: row.employeeName,
+              target,
+              conversationId
+            });
+            if (!selected.ok) {
+              log(`[conversation] skipped customer=${target.customerId} error=${selected.reason || 'select-failed'}`);
+              if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                dataset.progress.failed_conversation_ids.push(conversationId);
+              }
+              await markConversationCheckpoint({
+                checkpointPath,
+                mainPageNo,
+                employeeName: row.employeeName,
+                metricCategory: target.metricCategory,
+                metricPage: target.metricPage,
+                customerId: target.customerId,
+                conversationId
+              });
+              await saveDataset(outputPath, dataset);
+              pacedCustomerCount += 1;
+              await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount, paceConfig: domPaceConfig, paceStats });
+              continue;
+            }
+            if (paced) {
+              await waitForSelectedFriendReady(
+                pageClient,
+                pageSession.target.id,
+                target.customerId,
+                target.customerInfo,
+                {
+                  timeoutMs: domPaceConfig.DOM_SELECT_READY_TIMEOUT_MS,
+                  intervalMs: domPaceConfig.DOM_POLL_INTERVAL_MS,
+                  log
+                }
+              );
+            }
+
+            try {
+              const iframeClient = await getIframeClient(pageSession.target.id);
+              try {
+                const extracted = await waitForDateBoundedMessages(iframeClient, {
+                  dateStart,
+                  dateEnd,
+                  log,
+                  paced,
+                  domPaceConfig,
+                  pauseFile,
+                  stopFile,
+                  shutdownRequested
+                });
+                if (extracted.shutdown) {
+                  log(`[stop] 消息滚动期间收到停止，保存状态并退出…`);
+                  await saveDataset(outputPath, dataset);
+                  return {
+                    conversations: dataset.conversations.length,
+                    completed: dataset.progress.completed_conversation_ids.length,
+                    failed: dataset.progress.failed_conversation_ids.length,
+                    outputPath,
+                    shutdown: true
+                  };
+                }
+                log(
+                  `[conversation] messages ${extracted.messages.length}/${extracted.totalObservedMessageCount} filtered=${extracted.filteredOutMessageCount} scrolls=${extracted.scrolls} stop=${extracted.scrollStopReason} stable=${extracted.loaded} attempts=${extracted.attempts}`
+                );
+                await assertNoRateLimitForTarget({
+                  pageClient,
+                  outputPath,
+                  dataset,
+                  checkpointPath,
+                  mainPageNo,
+                  employeeName: row.employeeName,
+                  target,
+                  conversationId
+                });
+
+                if (!extracted.loaded) {
+                  if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                    dataset.progress.failed_conversation_ids.push(conversationId);
+                    await saveDataset(outputPath, dataset);
+                  }
+                  await markConversationCheckpoint({
+                    checkpointPath,
+                    mainPageNo,
+                    employeeName: row.employeeName,
+                    metricCategory: target.metricCategory,
+                    metricPage: target.metricPage,
+                    customerId: target.customerId,
+                    conversationId
+                  });
+                  pacedCustomerCount += 1;
+                  await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount, paceConfig: domPaceConfig, paceStats });
+                  continue;
+                }
+
+                const conversation = convertConversationToDataset({
+                  conversationId,
+                  employee: row,
+                  friendLabel: selected.text,
+                  friendPage: target.friendPage,
+                  customerId: target.customerId,
+                  sourceCustomerInfo: target.customerInfo,
+                  sourceMetricCategories: target.sourceMetricCategories,
+                  metricRows: target.metricRows,
+                  messages: extracted.messages,
+                  messageDateStart: dateStart,
+                  messageDateEnd: dateEnd,
+                  filteredOutMessageCount: extracted.filteredOutMessageCount,
+                  scrollStopReason: extracted.scrollStopReason,
+                  scrollIncomplete: extracted.incomplete,
+                  totalObservedMessageCount: extracted.totalObservedMessageCount
+                });
+
+                upsertDatasetConversation(dataset, conversation);
+                await appendJsonlRecord(jsonlPath, conversation);
+                if (shouldFlushDataset(dataset)) {
+                  await saveDataset(outputPath, dataset);
+                }
+                await markConversationCheckpoint({
+                  checkpointPath,
+                  mainPageNo,
+                  employeeName: row.employeeName,
+                  metricCategory: target.metricCategory,
+                  metricPage: target.metricPage,
+                  customerId: target.customerId,
+                  conversationId
+                });
+                pacedCustomerCount += 1;
+                await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount, paceConfig: domPaceConfig, paceStats });
+              } finally {
+                await iframeClient.close();
+              }
+            } catch (error) {
+              const message = normalizeErrorMessage(error);
+              log(`[conversation] skipped error=${message}`);
+
+              if (!shouldSkipConversationError(error)) {
+                if (error instanceof RateLimitedError) {
+                  await saveRateLimitCheckpoint({
+                    outputPath,
+                    dataset,
+                    checkpointPath,
+                    mainPageNo,
+                    employeeName: row.employeeName,
+                    target,
+                    conversationId
+                  });
+                }
+                throw error;
+              }
+
+              if (!dataset.progress.failed_conversation_ids.includes(conversationId)) {
+                dataset.progress.failed_conversation_ids.push(conversationId);
+                await saveDataset(outputPath, dataset);
+              }
+              await markConversationCheckpoint({
+                checkpointPath,
+                mainPageNo,
+                employeeName: row.employeeName,
+                metricCategory: target.metricCategory,
+                metricPage: target.metricPage,
+                customerId: target.customerId,
+                conversationId
+              });
+              pacedCustomerCount += 1;
+              await pacedAfterCustomer({ enabled: paced, log, count: pacedCustomerCount, paceConfig: domPaceConfig, paceStats });
+            }
           }
           continue;
         }
@@ -3150,6 +3902,21 @@ export async function exportCurrentPage({
           }
           await sleep(500);
         }
+      }
+    }
+    if (exportTargetList) {
+      const unmatchedOwners = [];
+      const reported = new Set();
+      for (const target of targetList?.targets || []) {
+        const key = target.normalizedOwnerName || normalizeOwnerName(target.ownerName || target.employeeName);
+        if (matchedTargetOwnerKeys.has(key) || reported.has(key)) {
+          continue;
+        }
+        reported.add(key);
+        unmatchedOwners.push(target.ownerName || target.employeeName);
+      }
+      if (unmatchedOwners.length > 0) {
+        log(`[target-list] unmatched owners ${unmatchedOwners.length}: ${unmatchedOwners.join(',')}`);
       }
     }
   } finally {

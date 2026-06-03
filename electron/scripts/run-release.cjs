@@ -12,6 +12,7 @@ const electronDir = path.join(__dirname, "..");
 const envPath = path.join(electronDir, ".env");
 const pkgPath = path.join(electronDir, "package.json");
 const distDir = path.join(electronDir, "dist");
+const tutorialPath = path.join(electronDir, "docs", "使用教程.md");
 
 const LARGE_FILE_EXTS = new Set([".dmg", ".exe", ".zip"]);
 const SMALL_FILE_EXTS = new Set([".yml", ".blockmap"]);
@@ -59,9 +60,10 @@ if (!process.env.GITLAB_TOKEN) {
 
 const rawArgs = process.argv.slice(2);
 const uploadOnly = rawArgs.includes("--upload-only");
-const builderArgs = rawArgs.filter((arg) => arg !== "--upload-only");
+const docsOnly = rawArgs.includes("--docs-only");
+const builderArgs = rawArgs.filter((arg) => arg !== "--upload-only" && arg !== "--docs-only");
 
-if (builderArgs.length === 0) {
+if (!docsOnly && builderArgs.length === 0) {
   console.error("[release] 请传入打包平台参数，例如 --mac 或 --win --x64");
   process.exit(1);
 }
@@ -187,6 +189,14 @@ async function getReleaseLinks(encodedProjectId) {
   );
 }
 
+function loadTutorialMarkdown() {
+  if (!fs.existsSync(tutorialPath)) {
+    console.warn(`[release] 未找到教程文件：${tutorialPath}`);
+    return "";
+  }
+  return fs.readFileSync(tutorialPath, "utf8").trim();
+}
+
 function buildReleaseDescription(links) {
   const byName = new Map(links.map((link) => [link.name, link.url]));
   const macArm64 = byName.get(`一手聊天审计导出-${pkg.version}-arm64.dmg`);
@@ -198,44 +208,44 @@ function buildReleaseDescription(links) {
     "",
     "## 下载安装",
     "",
+    "> 下载安装包前请先 **登录 GitLab**，否则可能提示 401/404。",
+    "",
   ];
 
   if (macArm64) lines.push(`- macOS Apple 芯片： [一手聊天审计导出-${pkg.version}-arm64.dmg](${macArm64})`);
   if (macX64) lines.push(`- macOS Intel： [一手聊天审计导出-${pkg.version}.dmg](${macX64})`);
   if (win) lines.push(`- Windows： [一手聊天审计导出 Setup ${pkg.version}.exe](${win})`);
 
-  lines.push(
-    "",
-    "## 使用说明",
-    "",
-    "1. 安装并启动软件。",
-    "2. 在专用 Chrome 窗口中登录 CRM。",
-    "3. 选择日期、部门和输出目录后开始导出。",
-    "",
-    "## macOS 提示",
-    "",
-    "当前安装包未做 Apple 公证。如提示无法打开，可在应用程序中右键打开，或执行：",
-    "",
-    "```bash",
-    "xattr -dr com.apple.quarantine \"/Applications/一手聊天审计导出.app\"",
-    "open \"/Applications/一手聊天审计导出.app\"",
-    "```",
-    "",
-    "Apple 芯片推荐下载 `arm64` 包，Intel 设备下载普通 `.dmg` 包。"
-  );
+  const tutorialBody = loadTutorialMarkdown();
+  if (tutorialBody) {
+    lines.push("", "---", "", tutorialBody);
+  }
 
   return lines.join("\n");
 }
 
+async function removeTutorialAssetLink(encodedProjectId) {
+  await deleteExistingAssetLink(encodedProjectId, "使用教程.md");
+}
+
 async function updateReleaseDescription(encodedProjectId) {
+  await removeTutorialAssetLink(encodedProjectId);
   const links = await getReleaseLinks(encodedProjectId);
+  const packageLinks = links.filter((link) => link.name !== "使用教程.md");
   await gitlabRequest(
     "PUT",
     `/projects/${encodedProjectId}/releases/${encodeURIComponent(tagName)}`,
-    JSON.stringify({ description: buildReleaseDescription(links) }),
+    JSON.stringify({ description: buildReleaseDescription(packageLinks) }),
     { "Content-Type": "application/json" }
   );
-  console.log("[release] 已更新 Release Markdown 描述");
+  console.log("[release] 已更新 Release 描述（教程直接展示于页面）");
+}
+
+async function publishDocsOnly() {
+  const encodedProjectId = encodeURIComponent(projectId);
+  await ensureRelease(encodedProjectId);
+  await updateReleaseDescription(encodedProjectId);
+  console.log(`[release] 教程已同步：${gitlabBaseUrl}/${projectId}/-/releases/${tagName}`);
 }
 
 function toSafePackageFileName(filePath) {
@@ -300,6 +310,11 @@ async function uploadArtifact(encodedProjectId, file) {
 }
 
 async function main() {
+  if (docsOnly) {
+    await publishDocsOnly();
+    return;
+  }
+
   const platform = detectPlatform(builderArgs);
   if (!platform) {
     console.error("[release] 暂只支持 --mac 或 --win 发布。");

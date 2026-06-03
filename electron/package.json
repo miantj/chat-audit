@@ -20,7 +20,8 @@
     "release:mac": "node scripts/run-release.cjs --mac",
     "release:upload:mac": "node scripts/run-release.cjs --mac --upload-only",
     "release:win": "node scripts/run-release.cjs --win --x64",
-    "release:upload:win": "node scripts/run-release.cjs --win --x64 --upload-only"
+    "release:upload:win": "node scripts/run-release.cjs --win --x64 --upload-only",
+    "release:docs": "node scripts/run-release.cjs --docs-only"
   },
   "build": {
     "appId": "com.yishou.chat-audit-export",

@@ -14,7 +14,12 @@ export function resolveExportOutputPath(raw, { cwd = process.cwd(), dateStart = 
         ? dir
         : path.resolve(cwd, dir)
       : path.join(cwd, 'exports');
-    const prefix = customerSelectionMode === 'all' ? 'chat-audit-all-customers' : 'chat-audit';
+    const prefix =
+      customerSelectionMode === 'all'
+        ? 'chat-audit-all-customers'
+        : customerSelectionMode === 'target-list'
+          ? 'chat-audit-target-list'
+          : 'chat-audit';
     return path.join(exportDir, `${prefix}-${dateStart}.json`);
   }
   return normalizeOutputPath(String(raw), cwd);

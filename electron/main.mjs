@@ -58,6 +58,7 @@ function sendToRenderer(channel, payload) {
 function normalizeExportOptions(raw) {
   const start = raw.start ?? raw.startDate ?? raw.exportDate;
   const end = raw.end ?? raw.endDate ?? start;
+  const exportMode = raw.exportMode || (raw.allCustomers ? 'all' : 'effective');
   return {
     start,
     end,
@@ -65,7 +66,11 @@ function normalizeExportOptions(raw) {
     endDate: end,
     department: raw.department,
     outputDir: raw.outputDir,
-    allCustomers: Boolean(raw.allCustomers)
+    exportMode,
+    allCustomers: exportMode === 'all' || Boolean(raw.allCustomers),
+    targetsFile: exportMode === 'targetList' ? raw.targetsFile || '' : '',
+    targetsSheet: raw.targetsSheet || '',
+    targetListStrategy: raw.targetListStrategy || 'visible'
   };
 }
 
@@ -154,6 +159,9 @@ ipcMain.handle('start-export', async (_event, rawOptions) => {
   }
   if (!options.start || !options.end) {
     return { success: false, error: '请填写开始日期和结束日期' };
+  }
+  if (options.exportMode === 'targetList' && !options.targetsFile) {
+    return { success: false, error: '请先选择目标名单文件（Excel/CSV）' };
   }
 
   clearExportSignals();
@@ -295,6 +303,44 @@ ipcMain.handle('open-directory', async (event) => {
     return { canceled: false, path: chosen };
   } catch (error) {
     log.error('open-directory error:', error);
+    return { canceled: true, error: error.message };
+  }
+});
+
+ipcMain.handle('open-targets-file', async (event) => {
+  try {
+    const saved = await loadSettings(userDataDir());
+    const parent =
+      BrowserWindow.fromWebContents(event.sender) ?? mainWindow ?? undefined;
+    if (parent && !parent.isDestroyed()) {
+      parent.focus();
+    }
+    const defaultPath =
+      saved.targetsFile && fs.existsSync(path.dirname(saved.targetsFile))
+        ? path.dirname(saved.targetsFile)
+        : saved.outputDir && fs.existsSync(saved.outputDir)
+          ? saved.outputDir
+          : app.getPath('documents');
+    const dialogOptions = {
+      title: '选择目标名单（Excel/CSV）',
+      properties: ['openFile'],
+      defaultPath,
+      filters: [
+        { name: '目标名单', extensions: ['xlsx', 'csv'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    };
+    const result = parent
+      ? await dialog.showOpenDialog(parent, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+    if (result.canceled || !result.filePaths?.length) {
+      return { canceled: true };
+    }
+    const chosen = result.filePaths[0];
+    await saveSettings(userDataDir(), { ...saved, targetsFile: chosen });
+    return { canceled: false, path: chosen };
+  } catch (error) {
+    log.error('open-targets-file error:', error);
     return { canceled: true, error: error.message };
   }
 });

@@ -11,6 +11,7 @@ const {
   resumeExport,
   stopExport,
   openDirectory,
+  openTargetsFile,
   getSettings,
   saveSettings,
   onExportProgress,
@@ -24,7 +25,12 @@ const {
 const startDate = document.getElementById('startDate');
 const endDate = document.getElementById('endDate');
 const singleDayMode = document.getElementById('singleDayMode');
-const allCustomers = document.getElementById('allCustomers');
+const exportModeRadios = document.querySelectorAll('input[name="exportMode"]');
+const targetListSection = document.getElementById('targetListSection');
+const targetsFile = document.getElementById('targetsFile');
+const selectTargetsFileBtn = document.getElementById('selectTargetsFile');
+const targetsSheet = document.getElementById('targetsSheet');
+const targetListStrategy = document.getElementById('targetListStrategy');
 const department = document.getElementById('department');
 const outputDir = document.getElementById('outputDir');
 const selectDirBtn = document.getElementById('selectDir');
@@ -239,11 +245,24 @@ function setUIState(state, options = {}) {
   refreshStatusLabel();
 }
 
+function getExportMode() {
+  const checked = document.querySelector('input[name="exportMode"]:checked');
+  return checked?.value || 'effective';
+}
+
+function applyExportModeUi() {
+  const mode = getExportMode();
+  targetListSection.classList.toggle('is-hidden', mode !== 'targetList');
+}
+
 async function persistFormSettings() {
   const payload = {
     singleDayMode: singleDayMode.checked,
     useDateRange: !singleDayMode.checked,
-    allCustomers: allCustomers.checked,
+    exportMode: getExportMode(),
+    targetsFile: targetsFile.value,
+    targetsSheet: targetsSheet.value,
+    targetListStrategy: targetListStrategy.value,
     outputDir: outputDir.value,
     department: department.value
   };
@@ -260,12 +279,22 @@ async function restoreFormSettings() {
         ? true
         : !saved.useDateRange;
   singleDayMode.checked = single;
-  allCustomers.checked = Boolean(saved.allCustomers);
+
+  const mode = saved.exportMode || (saved.allCustomers ? 'all' : 'effective');
+  exportModeRadios.forEach((radio) => {
+    radio.checked = radio.value === mode;
+  });
+  if (saved.targetsFile) targetsFile.value = saved.targetsFile;
+  if (saved.targetsSheet) targetsSheet.value = saved.targetsSheet;
+  if (saved.targetListStrategy) {
+    targetListStrategy.value = saved.targetListStrategy;
+  }
 
   if (saved.outputDir) outputDir.value = saved.outputDir;
   if (saved.department) department.value = saved.department;
 
   applyDefaultExportDate();
+  applyExportModeUi();
 
   if (saved.outputDir) {
     addLog(`已恢复输出目录: ${saved.outputDir}`, 'info');
@@ -380,9 +409,15 @@ singleDayMode.addEventListener('change', () => {
   persistFormSettings();
 });
 
-allCustomers.addEventListener('change', () => {
-  persistFormSettings();
+exportModeRadios.forEach((radio) => {
+  radio.addEventListener('change', () => {
+    applyExportModeUi();
+    persistFormSettings();
+  });
 });
+
+targetsSheet.addEventListener('change', () => persistFormSettings());
+targetListStrategy.addEventListener('change', () => persistFormSettings());
 
 startDate.addEventListener('change', () => {
   endDate.min = startDate.value;
@@ -411,7 +446,18 @@ startBtn.addEventListener('click', async () => {
 
   resetProgress();
   setUIState('running');
-  const modeLabel = allCustomers.checked ? '全部外部好友' : '有效指标客户';
+  const mode = getExportMode();
+  const modeLabel =
+    mode === 'targetList'
+      ? '目标名单'
+      : mode === 'all'
+        ? '全部外部好友'
+        : '有效指标客户';
+  if (mode === 'targetList' && !targetsFile.value) {
+    addLog('请先选择目标名单文件（Excel/CSV）', 'error');
+    setUIState('idle');
+    return;
+  }
   addLog(
     `开始导出：${start}${start === end ? '' : ` ~ ${end}`}（${modeLabel}）`
   );
@@ -422,7 +468,11 @@ startBtn.addEventListener('click', async () => {
     endDate: end,
     department: department.value,
     outputDir: outputDir.value,
-    allCustomers: allCustomers.checked
+    exportMode: mode,
+    allCustomers: mode === 'all',
+    targetsFile: mode === 'targetList' ? targetsFile.value : '',
+    targetsSheet: targetsSheet.value.trim(),
+    targetListStrategy: targetListStrategy.value
   });
 
   if (!result.success) {
@@ -485,6 +535,25 @@ selectDirBtn.addEventListener('click', async () => {
   }
 });
 
+selectTargetsFileBtn.addEventListener('click', async () => {
+  try {
+    const result = await openTargetsFile();
+    if (result?.error) {
+      addLog(`选择目标名单失败: ${result.error}`, 'error');
+      return;
+    }
+    if (result?.canceled || !result?.path) {
+      addLog('已取消选择目标名单');
+      return;
+    }
+    targetsFile.value = result.path;
+    await persistFormSettings();
+    addLog(`已选择目标名单: ${result.path}`, 'success');
+  } catch (err) {
+    addLog(`选择目标名单失败: ${err.message}`, 'error');
+  }
+});
+
 onExportProgress((data) => updateProgress(data));
 
 if (onExportPaused) {
@@ -534,6 +603,9 @@ onExportComplete((data) => {
   addLog(`JSON: ${data.outputPath || ''}`, 'success');
   if (data.csvPath) {
     addLog(`CSV: ${data.csvPath}`, 'success');
+  }
+  if (data.outDir) {
+    addLog(`按天导出目录: ${data.outDir}`, 'info');
   }
 });
 

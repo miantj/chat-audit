@@ -102,10 +102,47 @@ header .subtitle {
   cursor: pointer;
 }
 
-.form-group label.inline-check input[type='checkbox'] {
+.form-group label.inline-check input[type='checkbox'],
+.form-group label.inline-check input[type='radio'] {
   width: auto;
   padding: 0;
   flex-shrink: 0;
+}
+
+.export-mode-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.export-mode-row .inline-check {
+  margin-top: 0;
+}
+
+.field-hint {
+  margin: -2px 0 8px;
+  font-size: 12px;
+  color: #888;
+}
+
+.target-list-section.is-hidden {
+  display: none;
+}
+
+.target-list-options {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.target-list-options label {
+  margin-bottom: 0;
+  font-size: 13px;
+}
+
+.target-list-options input[type='text'],
+.target-list-options select {
+  width: 100%;
 }
 
 .form-section {

@@ -13,13 +13,14 @@
 
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import readline from 'node:readline';
 
 /** Parse `--key=value` / `--flag` style argv into a plain object. */
-function parseArgs() {
+export function parseArgs(argv = process.argv.slice(2)) {
   const opts = {};
-  for (const arg of process.argv.slice(2)) {
+  for (const arg of argv) {
     if (!arg.startsWith('--')) continue;
     const body = arg.slice(2);
     const eq = body.indexOf('=');
@@ -39,13 +40,14 @@ function showUsage() {
       '  --out=PATH.csv       Output path (default: same basename as --in, .csv)',
       '  --no-bom             Omit UTF-8 BOM (Excel 业务场景默认写入 BOM 便于中文)',
       '  --max-transcript=N   Truncate transcript cell to N chars (default 32700)',
+      '  --split-by-day       Write one CSV per message date: <basename>.YYYY-MM-DD.business.csv',
       '  --help               Show this message'
     ].join('\n')
   );
 }
 
 /** RFC 4180 CSV field: wrap in quotes, escape internal quotes. */
-function escapeCsvCell(value) {
+export function escapeCsvCell(value) {
   const s = value == null ? '' : String(value);
   if (/[",\r\n]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
@@ -54,7 +56,7 @@ function escapeCsvCell(value) {
 }
 
 /** Map dataset role to a short Chinese label for transcript lines. */
-function roleLabel(role) {
+export function roleLabel(role) {
   if (role === 'customer') return '客户';
   if (role === 'official') return '官方';
   return role || '未知';
@@ -63,21 +65,21 @@ function roleLabel(role) {
 /**
  * Check if a message type is image-related.
  */
-function isImageType(type) {
+export function isImageType(type) {
   return /image|emotion/i.test(type || '');
 }
 
 /**
  * Check if a message type is voice-related.
  */
-function isVoiceType(type) {
+export function isVoiceType(type) {
   return /voice/i.test(type || '');
 }
 
 /**
  * Check if a message type is video-related.
  */
-function isVideoType(type) {
+export function isVideoType(type) {
   return /video/i.test(type || '');
 }
 
@@ -85,7 +87,7 @@ function isVideoType(type) {
  * Format attachments for transcript inclusion.
  * Filters out SVG play buttons (common in WeChat video placeholders).
  */
-function formatAttachmentSuffix(attachments) {
+export function formatAttachmentSuffix(attachments) {
   const parts = [];
   const isPlaySvg = (url) => /^data:image\/svg/i.test(url || '');
   const imgList = Array.isArray(attachments?.images) ? attachments.images : [];
@@ -114,7 +116,7 @@ function formatAttachmentSuffix(attachments) {
  * - Voice rows: outputs [角色] [语音] text or transcribed text
  * - Pure text: outputs as before
  */
-function buildTranscript(messages, maxChars) {
+export function buildTranscript(messages, maxChars) {
   const list = Array.isArray(messages) ? [...messages] : [];
   list.sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
   const lines = [];
@@ -173,7 +175,7 @@ function buildTranscript(messages, maxChars) {
 }
 
 /** Count messages that contribute at least one line to the transcript (text, voice, video, or image). */
-function countTextMessages(messages) {
+export function countTextMessages(messages) {
   if (!Array.isArray(messages)) return 0;
   return messages.filter((m) => {
     const t = typeof m.text === 'string' ? m.text.trim() : '';
@@ -183,7 +185,7 @@ function countTextMessages(messages) {
   }).length;
 }
 
-function conversationToRow(conv, maxTranscriptChars) {
+export function conversationToRow(conv, maxTranscriptChars) {
   const sm = conv.source_meta && typeof conv.source_meta === 'object' ? conv.source_meta : {};
   return {
     conversation_id: conv.conversation_id ?? '',
@@ -201,7 +203,7 @@ function conversationToRow(conv, maxTranscriptChars) {
   };
 }
 
-const HEADER = [
+export const HEADER = [
   'conversation_id',
   'employee_name',
   'customer_name',
@@ -216,12 +218,62 @@ const HEADER = [
   'transcript'
 ];
 
-function rowToCsvLine(row) {
+export function rowToCsvLine(row) {
   return HEADER.map((key) => escapeCsvCell(row[key])).join(',');
 }
 
+export function messageDate(value) {
+  if (typeof value !== 'string') return '';
+  const m = value.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : '';
+}
+
+function dateFallbackForConversation(conv) {
+  return messageDate(conv.started_at) || messageDate(conv.ended_at) || 'unknown-date';
+}
+
+export function splitConversationByMessageDate(conv) {
+  const messages = Array.isArray(conv.messages) ? conv.messages : [];
+  if (messages.length === 0) {
+    const date = dateFallbackForConversation(conv);
+    return [{ date, conversation: { ...conv, messages: [], message_count: 0 } }];
+  }
+
+  const groups = new Map();
+  for (const message of messages) {
+    const date = messageDate(message.timestamp) || dateFallbackForConversation(conv);
+    if (!groups.has(date)) groups.set(date, []);
+    groups.get(date).push(message);
+  }
+
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, dayMessages]) => {
+      const sorted = [...dayMessages].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
+      const first = sorted[0];
+      const last = sorted[sorted.length - 1];
+      return {
+        date,
+        conversation: {
+          ...conv,
+          conversation_id: `${conv.conversation_id ?? 'conversation'}__date_${date}`,
+          started_at: first?.timestamp || conv.started_at || '',
+          ended_at: last?.timestamp || conv.ended_at || '',
+          message_count: sorted.length,
+          messages: sorted,
+          source_meta: {
+            ...(conv.source_meta || {}),
+            split_by_day: true,
+            split_date: date,
+            original_conversation_id: conv.conversation_id ?? ''
+          }
+        }
+      };
+    });
+}
+
 /** Load all conversations from a full dataset JSON file. */
-async function loadConversationsFromJson(filePath) {
+export async function loadConversationsFromJson(filePath) {
   const text = await fsp.readFile(filePath, 'utf8');
   const data = JSON.parse(text);
   const list = data.conversations;
@@ -235,7 +287,7 @@ async function loadConversationsFromJson(filePath) {
  * Stream JSONL: one conversation JSON per line (same shape as each element of
  * `conversations[]`). Yields each parsed object for constant-ish memory use.
  */
-async function* iterateJsonlConversations(filePath) {
+export async function* iterateJsonlConversations(filePath) {
   const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   for await (const line of rl) {
@@ -245,52 +297,106 @@ async function* iterateJsonlConversations(filePath) {
   }
 }
 
-const opts = parseArgs();
-if (opts.help || opts.h) {
-  showUsage();
-  process.exit(0);
+export async function* iterateConversations(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.jsonl') {
+    yield* iterateJsonlConversations(filePath);
+    return;
+  }
+  for (const conv of await loadConversationsFromJson(filePath)) {
+    yield conv;
+  }
 }
 
-const inputPath = path.resolve(process.cwd(), opts.in || '');
-if (!inputPath) {
-  showUsage();
-  process.exit(1);
+function defaultOutPath(inputPath) {
+  return inputPath.replace(/\.jsonl?$/i, '') + '.business.csv';
 }
 
-const useBom = !opts['no-bom'];
-const maxTranscript = Number(opts['max-transcript'] ?? 32700);
-const outPath = opts.out
-  ? path.resolve(process.cwd(), opts.out)
-  : inputPath.replace(/\.jsonl?$/i, '') + '.business.csv';
+function splitOutPath(inputPath, date) {
+  return inputPath.replace(/\.jsonl?$/i, '') + `.${date}.business.csv`;
+}
 
-const ext = path.extname(inputPath).toLowerCase();
-
-async function main() {
+async function writeCsvFile(outPath, rows, { useBom }) {
+  await fsp.mkdir(path.dirname(outPath), { recursive: true });
   const out = fs.createWriteStream(outPath, { encoding: 'utf8' });
   if (useBom) {
     out.write('\uFEFF');
   }
   out.write(`${HEADER.map(escapeCsvCell).join(',')}\n`);
-
-  if (ext === '.jsonl') {
-    for await (const conv of iterateJsonlConversations(inputPath)) {
-      out.write(`${rowToCsvLine(conversationToRow(conv, maxTranscript))}\n`);
-    }
-  } else {
-    const conversations = await loadConversationsFromJson(inputPath);
-    for (const conv of conversations) {
-      out.write(`${rowToCsvLine(conversationToRow(conv, maxTranscript))}\n`);
-    }
+  for (const row of rows) {
+    out.write(`${row}\n`);
   }
-
   await new Promise((resolve, reject) => {
     out.end(resolve);
     out.on('error', reject);
   });
-  console.error(`Wrote ${outPath}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+async function writeSingleCsv(inputPath, outPath, { useBom, maxTranscript }) {
+  await fsp.mkdir(path.dirname(outPath), { recursive: true });
+  const out = fs.createWriteStream(outPath, { encoding: 'utf8' });
+  if (useBom) out.write('\uFEFF');
+  out.write(`${HEADER.map(escapeCsvCell).join(',')}\n`);
+  for await (const conv of iterateConversations(inputPath)) {
+    out.write(`${rowToCsvLine(conversationToRow(conv, maxTranscript))}\n`);
+  }
+  await new Promise((resolve, reject) => {
+    out.end(resolve);
+    out.on('error', reject);
+  });
+  return [outPath];
+}
+
+async function writeSplitByDayCsv(inputPath, { useBom, maxTranscript }) {
+  const byDate = new Map();
+  for await (const conv of iterateConversations(inputPath)) {
+    for (const part of splitConversationByMessageDate(conv)) {
+      if (!byDate.has(part.date)) byDate.set(part.date, []);
+      byDate.get(part.date).push(rowToCsvLine(conversationToRow(part.conversation, maxTranscript)));
+    }
+  }
+
+  const written = [];
+  for (const [date, rows] of [...byDate.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const outPath = splitOutPath(inputPath, date);
+    await writeCsvFile(outPath, rows, { useBom });
+    written.push(outPath);
+  }
+  return written;
+}
+
+export async function runCsvBusiness(opts) {
+  const inputPath = path.resolve(process.cwd(), opts.in || '');
+  if (!opts.in) {
+    throw new Error('Missing --in');
+  }
+  const useBom = !opts['no-bom'];
+  const maxTranscript = Number(opts['max-transcript'] ?? 32700);
+  if (opts['split-by-day']) {
+    if (opts.out) {
+      throw new Error('--out is not supported with --split-by-day');
+    }
+    return writeSplitByDayCsv(inputPath, { useBom, maxTranscript });
+  }
+  const outPath = opts.out ? path.resolve(process.cwd(), opts.out) : defaultOutPath(inputPath);
+  return writeSingleCsv(inputPath, outPath, { useBom, maxTranscript });
+}
+
+async function main() {
+  const opts = parseArgs();
+  if (opts.help || opts.h) {
+    showUsage();
+    return;
+  }
+  const written = await runCsvBusiness(opts);
+  for (const outPath of written) {
+    console.error(`Wrote ${outPath}`);
+  }
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

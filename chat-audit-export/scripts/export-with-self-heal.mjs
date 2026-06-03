@@ -60,20 +60,30 @@ function parseCliArgs(argv) {
     out: '',
     keywords: '',
     skipDateValidation: true,
+    fastPaced: false,
     paced: false,
     retryFailed: false,
     fast: false,
     fullExport: false,
     allCustomers: false,
-    noEffectiveFilter: false
+    noEffectiveFilter: false,
+    targetsFile: '',
+    targetsSheet: '',
+    targetListStrategy: ''
   };
   for (const arg of argv) {
     if (arg.startsWith('--start=')) opts.start = arg.slice(8);
     else if (arg.startsWith('--end=')) opts.end = arg.slice(6);
     else if (arg.startsWith('--out=')) opts.out = arg.slice(6);
     else if (arg.startsWith('--keywords=')) opts.keywords = arg.slice(11);
+    else if (arg.startsWith('--targets-file=')) opts.targetsFile = arg.slice(15);
+    else if (arg.startsWith('--targets-sheet=')) opts.targetsSheet = arg.slice(16);
+    else if (arg.startsWith('--target-list-strategy=')) {
+      opts.targetListStrategy = arg.slice(23);
+    }
     else if (arg === '--skip-date-validation') opts.skipDateValidation = true;
     else if (arg === '--paced') opts.paced = true;
+    else if (arg === '--fast-paced') opts.fastPaced = true;
     else if (arg === '--no-paced') opts.paced = false;
     else if (arg === '--retry-failed') opts.retryFailed = true;
     else if (arg === '--fast') opts.fast = true;
@@ -376,11 +386,17 @@ function runExportDateRange(opts, exportOut, env) {
   ];
   args.push(`--keywords=${opts.keywords}`);
   if (opts.skipDateValidation) args.push('--skip-date-validation');
-  if (opts.paced) args.push('--paced');
+  if (opts.fastPaced) args.push('--fast-paced');
+  else if (opts.paced) args.push('--paced');
   if (opts.retryFailed) args.push('--retry-failed');
   if (opts.fast) args.push('--fast');
   if (opts.allCustomers) args.push('--all-customers');
   if (opts.noEffectiveFilter) args.push('--no-effective-filter');
+  if (opts.targetsFile) args.push(`--targets-file=${opts.targetsFile}`);
+  if (opts.targetsSheet) args.push(`--targets-sheet=${opts.targetsSheet}`);
+  if (opts.targetListStrategy) {
+    args.push(`--target-list-strategy=${opts.targetListStrategy}`);
+  }
 
   return new Promise((resolve) => {
     let output = '';
@@ -461,8 +477,15 @@ async function main() {
   }
 
   const callerCwd = process.env.CHAT_AUDIT_CALLER_CWD || process.cwd();
-  const customerSelectionMode =
-    cli.allCustomers || cli.noEffectiveFilter ? 'all' : 'effective';
+  if (cli.targetsFile && (cli.allCustomers || cli.noEffectiveFilter)) {
+    console.error('Error: --targets-file cannot be combined with --all-customers or --no-effective-filter.');
+    process.exit(1);
+  }
+  const customerSelectionMode = cli.targetsFile
+    ? 'target-list'
+    : cli.allCustomers || cli.noEffectiveFilter
+      ? 'all'
+      : 'effective';
   const exportOut = resolveExportOutputPath(
     process.env.OUTPUT_PATH || cli.out || null,
     {
