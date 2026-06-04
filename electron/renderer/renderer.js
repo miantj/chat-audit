@@ -1072,7 +1072,9 @@ onExportComplete((data) => {
   if (data.failed > 0) {
     addLog(`仍有 ${data.failed} 条会话失败（已自动补跑最多 2 次）`, 'error');
   }
-  addLog(`JSON: ${data.outputPath || ''}`, 'success');
+  if (data.outputPath) {
+    addLog(`JSON: ${data.outputPath}`, 'success');
+  }
   if (data.csvPath) {
     addLog(`CSV: ${data.csvPath}`, 'success');
   }

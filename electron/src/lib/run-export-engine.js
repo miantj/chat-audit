@@ -569,7 +569,25 @@ export function runTargetListByDayEngine(options, eventEmitter) {
     });
     proc.on('close', (code) => {
       if (lineBuf.trim()) handleLine(lineBuf.trim());
+      const summary = parseExportSummaryFromLogs(stdoutBuf);
+      const shutdown = summary?.shutdown ?? false;
+
       if (code === 0) {
+        if (shutdown) {
+          resolve({
+            outputPath: null,
+            csvPath: null,
+            code,
+            conversationCount: 0,
+            failed: 0,
+            shutdown: true,
+            employeeProgressCurrent: 0,
+            employeeProgressTotal: 0,
+            progressUnit: 'day',
+            outDir
+          });
+          return;
+        }
         let conversationCount = 0;
         try {
           conversationCount = countExportedConversations(mergedOut);

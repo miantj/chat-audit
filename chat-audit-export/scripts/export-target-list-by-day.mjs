@@ -183,6 +183,16 @@ function dailyExportMarkerMatches(marker, day, opts) {
   return JSON.stringify(markerData.fingerprint) === JSON.stringify(expected);
 }
 
+function isDailyExportComplete(dailyOut, day, opts) {
+  const marker = dailyExportDonePath(dailyOut);
+  return (
+    fs.existsSync(marker) &&
+    fs.existsSync(dailyOut) &&
+    fs.statSync(dailyOut).size > 0 &&
+    dailyExportMarkerMatches(marker, day, opts)
+  );
+}
+
 function shouldSkipDailyExport(dailyOut, day, opts) {
   if (opts.forceAllDays) {
     return null;
@@ -190,13 +200,7 @@ function shouldSkipDailyExport(dailyOut, day, opts) {
   if (opts.forceDays.includes(day)) {
     return null;
   }
-  const marker = dailyExportDonePath(dailyOut);
-  if (
-    fs.existsSync(marker) &&
-    fs.existsSync(dailyOut) &&
-    fs.statSync(dailyOut).size > 0 &&
-    dailyExportMarkerMatches(marker, day, opts)
-  ) {
+  if (isDailyExportComplete(dailyOut, day, opts)) {
     return 'already complete';
   }
   return null;
@@ -351,6 +355,8 @@ async function main() {
 
   const dates = enumerateDates(opts.start, opts.end);
   let skippedDays = 0;
+  let batchInterrupted = false;
+  let interruptedDay = '';
 
   if (!opts.mergeOnly) {
     for (let dayIndex = 0; dayIndex < dates.length; dayIndex++) {
@@ -403,11 +409,28 @@ async function main() {
         console.warn(
           `Warning: daily export for ${day} ended before completion (shutdown/interrupted); will resume on next run.`
         );
+        batchInterrupted = true;
+        interruptedDay = day;
+        break;
       }
     }
   }
 
+  if (batchInterrupted) {
+    console.log('');
+    console.log(
+      JSON.stringify({
+        event: 'export-shutdown',
+        shutdown: true,
+        interruptedDay,
+        message: '按天导出已中断，未生成合并文件；下次运行将从断点续传。'
+      })
+    );
+    process.exit(0);
+  }
+
   const mergeInputs = [];
+  let mergeSkippedIncomplete = 0;
   for (const day of dates) {
     const dailyJson = path.join(outDir, `${opts.basename}-${day}.json`);
     if (!fs.existsSync(dailyJson)) {
@@ -417,6 +440,13 @@ async function main() {
     const size = fs.statSync(dailyJson).size;
     if (size === 0) {
       console.warn(`Warning: empty daily export (0 bytes), not merging: ${dailyJson}`);
+      continue;
+    }
+    if (!isDailyExportComplete(dailyJson, day, opts)) {
+      console.warn(
+        `Warning: daily export for ${day} is not marked complete, not merging: ${dailyJson}`
+      );
+      mergeSkippedIncomplete += 1;
       continue;
     }
     mergeInputs.push(`--in=${dailyJson}`);
@@ -440,6 +470,11 @@ async function main() {
   console.log('✅ Daily target-list export complete');
   if (skippedDays > 0) {
     console.log(`Skipped ${skippedDays} already-complete day(s); merged ${mergeInputs.length} daily file(s).`);
+  }
+  if (mergeSkippedIncomplete > 0) {
+    console.log(
+      `Excluded ${mergeSkippedIncomplete} incomplete day(s) from merge (no matching .export-done marker).`
+    );
   }
   console.log(`Merged JSON:  ${mergedOut}`);
   console.log(`Merged JSONL: ${mergedJsonl}`);
