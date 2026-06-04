@@ -608,9 +608,12 @@ export function runTargetListByDayEngine(options, eventEmitter) {
           outDir
         });
       } else {
-        const logText = (stderrBuf || stdoutBuf).trim();
+        const logText = `${stdoutBuf}\n${stderrBuf}`.trim();
+        const parsed = parseExportErrorFromLogs(logText);
         reject(
-          new Error(`按天目标名单导出失败 (exit ${code})\n${logText}`.slice(0, 1200))
+          new Error(
+            parsed || `按天目标名单导出失败 (exit ${code})`
+          )
         );
       }
     });

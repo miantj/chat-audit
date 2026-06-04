@@ -432,6 +432,15 @@ async function waitForSelectedFriendReady(
         item.parentId === parentPageId &&
         item.url.includes('ww-open-data-frame')
     );
+    const hasLoginIframe = targets.some(
+      (item) =>
+        item.type === 'iframe' &&
+        item.parentId === parentPageId &&
+        item.url.includes('login.work.weixin.qq.com')
+    );
+    if (hasLoginIframe) {
+      throw new WxworkLoginRequiredError();
+    }
     lastState = { ...pageState, hasMessageIframe };
     if (lastState.activeMatches && hasMessageIframe && !lastState.loading) {
       const ms = Date.now() - startedAt;
@@ -465,6 +474,15 @@ async function waitForMessageIframeReady(
         item.parentId === parentPageId &&
         item.url.includes('ww-open-data-frame')
     );
+    const hasLoginIframe = targets.some(
+      (item) =>
+        item.type === 'iframe' &&
+        item.parentId === parentPageId &&
+        item.url.includes('login.work.weixin.qq.com')
+    );
+    if (hasLoginIframe) {
+      throw new WxworkLoginRequiredError();
+    }
     if (hasMessageIframe) {
       const ms = Date.now() - startedAt;
       if (log) {
@@ -474,6 +492,7 @@ async function waitForMessageIframeReady(
     }
     await sleep(intervalMs);
   }
+  await checkWxworkLoginState(parentPageId);
   const ms = Date.now() - startedAt;
   if (log) {
     log(`[dom-wait] message iframe timeout wait=${ms}ms`);
@@ -664,25 +683,181 @@ async function getPageSession() {
 
 async function checkWxworkLoginState(parentPageId) {
   const allTargets = await getTargets();
-  const dataIframe = allTargets.find(
-    (item) =>
-      item.type === 'iframe' &&
-      item.url.includes('ww-open-data-frame') &&
-      (!parentPageId || item.parentId === parentPageId)
-  );
-  if (dataIframe) {
-    return;
-  }
+  const scopedIframe = (item) =>
+    item.type === 'iframe' && (!parentPageId || item.parentId === parentPageId);
 
+  // 与 crm-preflight 一致：登录 iframe 优先于消息 iframe（二者可能同时出现在 CDP targets 里）
   const loginIframe = allTargets.find(
-    (item) =>
-      item.type === 'iframe' &&
-      item.url.includes('login.work.weixin.qq.com') &&
-      (!parentPageId || item.parentId === parentPageId)
+    (item) => scopedIframe(item) && item.url.includes('login.work.weixin.qq.com')
   );
   if (loginIframe) {
     throw new WxworkLoginRequiredError();
   }
+
+  const dataIframe = allTargets.find(
+    (item) => scopedIframe(item) && item.url.includes('ww-open-data-frame')
+  );
+  if (dataIframe) {
+    return;
+  }
+}
+
+async function openTargetViaMetricTables(pageClient, target) {
+  for (const metricCategory of EFFECTIVE_METRIC_CATEGORIES) {
+    const probeTarget = {
+      ...target,
+      metricCategory,
+      metricPage: target.metricPage || 1,
+      metricRows: target.metricRows || [{ metricPage: 1 }]
+    };
+    const opened = await openChatFromMetricTableRow(pageClient, probeTarget, { postOpenSleep: false });
+    if (opened.ok) {
+      return {
+        ok: true,
+        method: `metric:${opened.method || 'goToContent'}`,
+        metricCategory,
+        opened
+      };
+    }
+  }
+  return { ok: false, reason: 'metric-row-missing' };
+}
+
+async function openTargetViaVisibleFriends(pageClient, target) {
+  await clearExternalFriendSearch(pageClient);
+  const idSet = new Set(
+    [String(target.customerId || ''), ...extractAllCustomerIds(target.customerInfo)].filter(Boolean)
+  );
+  let friendPager = await getFriendPager(pageClient);
+  for (let friendPage = 1; friendPage <= friendPager.totalPages; friendPage++) {
+    if (friendPage > 1) {
+      const next = await clickFriendNextPage(pageClient);
+      if (!next.ok) {
+        break;
+      }
+      await sleep(WAIT_MS);
+    }
+    const pageState = await waitForFriendPageItems(pageClient, friendPage);
+    for (const friend of pageState.items || []) {
+      const customerId = extractCustomerId(friend.text);
+      if (!customerId || !idSet.has(customerId)) {
+        continue;
+      }
+      const selected =
+        friend.friendIndex != null && Number.isFinite(friend.friendIndex)
+          ? await clickFriendItem(pageClient, friend.friendIndex)
+          : await clickFriendItemByCustomerId(pageClient, customerId);
+      if (selected?.ok) {
+        return { ok: true, method: 'visible-friend', customerId, selected };
+      }
+    }
+    friendPager = pageState.pager;
+  }
+  return { ok: false, reason: 'visible-friend-missing' };
+}
+
+async function assertWecomSessionAfterCustomerOpen(
+  pageClient,
+  parentPageId,
+  target,
+  { paced, domPaceConfig, log }
+) {
+  if (paced) {
+    await waitForSelectedFriendReady(pageClient, parentPageId, target.customerId, target.customerInfo, {
+      timeoutMs: domPaceConfig.DOM_SELECT_READY_TIMEOUT_MS,
+      intervalMs: domPaceConfig.DOM_POLL_INTERVAL_MS,
+      log
+    });
+  } else {
+    await sleep(WAIT_MS);
+  }
+  await waitForMessageIframeReady(parentPageId, {
+    timeoutMs: domPaceConfig.DOM_SELECT_READY_TIMEOUT_MS,
+    intervalMs: domPaceConfig.DOM_POLL_INTERVAL_MS,
+    log
+  });
+  await checkWxworkLoginState(parentPageId);
+}
+
+/**
+ * 目标名单：尽量选中一个目标客户并检测企微（与有效客户模式一致：指标表 goToContent / 搜索 / 可见列表）。
+ */
+async function probeWecomSessionForTargets(
+  pageClient,
+  parentPageId,
+  targets,
+  { paced, domPaceConfig, log }
+) {
+  for (const target of targets) {
+    log(`[wecom-probe] try customer=${target.customerId}`);
+
+    const metricOpened = await openTargetViaMetricTables(pageClient, target);
+    if (metricOpened.ok) {
+      log(`[wecom-probe] opened ${metricOpened.method} category=${metricOpened.metricCategory}`);
+      await assertWecomSessionAfterCustomerOpen(pageClient, parentPageId, target, {
+        paced,
+        domPaceConfig,
+        log
+      });
+      log('[wecom-probe] ok — enterprise WeChat session ready');
+      return { probed: true, customerId: target.customerId, method: metricOpened.method };
+    }
+
+    const switched = await switchToCommunicationExternalFriends(pageClient);
+    if (!switched.ok) {
+      log('[wecom-probe] switch-to-communication-failed');
+      continue;
+    }
+    await clearExternalFriendSearch(pageClient);
+
+    const searched = await searchExternalFriendByCustomerId(
+      pageClient,
+      target.customerId,
+      target.customerInfo,
+      { pollIntervalMs: paced ? domPaceConfig.DOM_POLL_INTERVAL_MS : 500 }
+    );
+    if (searched.ok) {
+      const selected = await selectSearchedFriend(
+        pageClient,
+        target.customerId,
+        searched.match?.friendIndex,
+        target.customerInfo,
+        { waitAfterSelect: !paced }
+      );
+      if (selected.ok) {
+        log('[wecom-probe] opened search');
+        await assertWecomSessionAfterCustomerOpen(pageClient, parentPageId, target, {
+          paced,
+          domPaceConfig,
+          log
+        });
+        await clearExternalFriendSearch(pageClient);
+        log('[wecom-probe] ok — enterprise WeChat session ready');
+        return { probed: true, customerId: target.customerId, method: 'search' };
+      }
+    }
+
+    const visibleOpened = await openTargetViaVisibleFriends(pageClient, target);
+    if (visibleOpened.ok) {
+      log(`[wecom-probe] opened ${visibleOpened.method}`);
+      await assertWecomSessionAfterCustomerOpen(pageClient, parentPageId, target, {
+        paced,
+        domPaceConfig,
+        log
+      });
+      await resetFriendPagerToFirstPage(pageClient, { log });
+      await clearExternalFriendSearch(pageClient);
+      log('[wecom-probe] ok — enterprise WeChat session ready');
+      return { probed: true, customerId: target.customerId, method: visibleOpened.method };
+    }
+
+    log(
+      `[wecom-probe] cannot open customer=${target.customerId} metric=${metricOpened.reason || 'miss'} search=${searched.ok ? 'select-failed' : searched.reason || 'miss'} visible=${visibleOpened.reason || 'miss'}`
+    );
+  }
+
+  log('[wecom-probe] deferred — no target could be opened on this employee; will check on first visible match');
+  return { probed: false };
 }
 
 async function checkRateLimitState(pageClient) {
@@ -989,6 +1164,43 @@ async function clickFriendNextPage(pageClient) {
   );
 }
 
+async function clickFriendPrevPage(pageClient) {
+  return evalJson(
+    pageClient,
+    `(() => {
+      const dialog = ${visibleDialogExpr};
+      const angles = dialog?.querySelectorAll('.pagination-angle') || [];
+      const target = angles[0];
+      if (!target) return { ok: false, reason: 'prev-missing' };
+      target.click();
+      return { ok: true };
+    })()`
+  );
+}
+
+/** 探测/搜索可能把好友列表停在第 N 页；导出前回到第 1 页，避免 visible 扫描漏页。 */
+async function resetFriendPagerToFirstPage(pageClient, { log } = {}) {
+  let pager = await getFriendPager(pageClient);
+  if (pager.currentPage <= 1) {
+    return { ok: true, pager };
+  }
+  let guard = 0;
+  while (pager.currentPage > 1 && guard < 30) {
+    const prev = await clickFriendPrevPage(pageClient);
+    if (!prev.ok) {
+      break;
+    }
+    await sleep(WAIT_MS);
+    pager = await getFriendPager(pageClient);
+    guard += 1;
+  }
+  const ok = pager.currentPage <= 1;
+  if (log) {
+    log(`[friend-page] reset to page 1 ok=${ok} current=${pager.currentPage}/${pager.totalPages}`);
+  }
+  return { ok, pager };
+}
+
 async function waitForFriendPageItems(pageClient, targetPage) {
   return waitForFriendPageReady({
     targetPage,
@@ -998,6 +1210,44 @@ async function waitForFriendPageItems(pageClient, targetPage) {
     maxAttempts: 10,
     intervalMs: 500
   });
+}
+
+async function loadFriendPageForExport(pageClient, targetPage, { log } = {}) {
+  let pageState = await waitForFriendPageItems(pageClient, targetPage);
+  if (pageState.ready && pageState.pager?.currentPage === targetPage) {
+    return { ok: true, pageState };
+  }
+
+  const reset = await resetFriendPagerToFirstPage(pageClient, { log });
+  if (!reset.ok) {
+    return {
+      ok: false,
+      reason: 'pager-reset-failed',
+      pageState,
+      currentPage: pageState.pager?.currentPage
+    };
+  }
+
+  if (targetPage > 1) {
+    for (let page = 2; page <= targetPage; page += 1) {
+      const next = await clickFriendNextPage(pageClient);
+      if (!next.ok) {
+        return { ok: false, reason: 'pager-advance-failed', targetPage, currentPage: page - 1 };
+      }
+      await sleep(WAIT_MS);
+    }
+  }
+
+  pageState = await waitForFriendPageItems(pageClient, targetPage);
+  if (!pageState.ready || pageState.pager?.currentPage !== targetPage) {
+    return {
+      ok: false,
+      reason: 'pager-not-ready',
+      pageState,
+      currentPage: pageState.pager?.currentPage
+    };
+  }
+  return { ok: true, pageState };
 }
 
 function parseCountFromText(text) {
@@ -2256,6 +2506,7 @@ export async function exportCurrentPage({
   const targetListVisibleStrategy = exportTargetList && targetListStrategy === 'visible';
   const targetListByOwner = exportTargetList ? groupTargetsByOwner(targetList) : new Map();
   const matchedTargetOwnerKeys = new Set();
+  let wecomSessionProbed = false;
   let checkpoint = await loadCheckpoint(checkpointPath);
   const loadedCheckpoint = { ...checkpoint };
   const clearMetricCheckpoint =
@@ -2824,6 +3075,17 @@ export async function exportCurrentPage({
           const ownerTargets = targetListByOwner.get(targetOwnerKey) || [];
           const targets = ownerTargets.map((target) => buildTargetListTarget(target, row.employeeName));
           log(`[row] target-list targets ${targets.length}`);
+          if (targets.length > 0 && !wecomSessionProbed && !dryRunTargets) {
+            const probeResult = await probeWecomSessionForTargets(
+              pageClient,
+              pageSession.target.id,
+              targets,
+              { paced, domPaceConfig, log }
+            );
+            if (probeResult.probed) {
+              wecomSessionProbed = true;
+            }
+          }
           if (dryRunTargets) {
             for (const target of targets) {
               log(
@@ -2843,6 +3105,7 @@ export async function exportCurrentPage({
             }
             const clearedSearch = await clearExternalFriendSearch(pageClient);
             log(`[row] clear friend search ok=${clearedSearch.ok}`);
+            await resetFriendPagerToFirstPage(pageClient, { log });
 
             const targetByCustomerId = buildTargetMapByCustomerId(ownerTargets, row.employeeName);
             let matchedVisibleCount = 0;
@@ -2861,7 +3124,14 @@ export async function exportCurrentPage({
                 await sleep(WAIT_MS);
               }
 
-              const pageState = await waitForFriendPageItems(pageClient, friendPage);
+              const loaded = await loadFriendPageForExport(pageClient, friendPage, { log });
+              if (!loaded.ok) {
+                log(
+                  `[friend-page] skip target-list visible page=${friendPage} reason=${loaded.reason || 'pager-not-ready'} current=${loaded.currentPage ?? loaded.pageState?.pager?.currentPage ?? '?'}`
+                );
+                continue;
+              }
+              const pageState = loaded.pageState;
               const friends = pageState.items || [];
               log(`[friend-page] target-list visible page=${friendPage}/${pageState.pager.totalPages} friends=${friends.length}`);
 
@@ -2979,7 +3249,15 @@ export async function exportCurrentPage({
                   stats: paceStats,
                   statsKey: 'selectWaitMsTotal'
                 });
-                if (paced) {
+                if (!wecomSessionProbed) {
+                  await assertWecomSessionAfterCustomerOpen(pageClient, pageSession.target.id, target, {
+                    paced,
+                    domPaceConfig,
+                    log
+                  });
+                  wecomSessionProbed = true;
+                  log(`[wecom-probe] ok on visible match customer=${target.customerId}`);
+                } else if (paced) {
                   await waitForSelectedFriendReady(
                     pageClient,
                     pageSession.target.id,
