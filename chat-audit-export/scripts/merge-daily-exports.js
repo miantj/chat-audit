@@ -3,7 +3,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createEmptyDataset } from './lib/dataset.js';
-import { readJsonFile } from './lib/export-script-lib/read-json-file.mjs';
 import { appendJsonlRecord, readJsonlRecords } from './lib/jsonl-store.js';
 
 function parseArgs(argv = process.argv.slice(2)) {
@@ -176,15 +175,67 @@ function mergeConversation(existing, incoming, sourceDate) {
   };
 }
 
+function jsonlSiblingPath(jsonPath) {
+  return jsonPath.replace(/\.json$/i, '.jsonl');
+}
+
+async function isMissingOrEmptyFile(inputPath) {
+  try {
+    const stat = await fs.stat(inputPath);
+    return stat.size === 0;
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return true;
+    }
+    throw error;
+  }
+}
+
 async function loadConversations(inputPath) {
   if (/\.jsonl$/i.test(inputPath)) {
     return readJsonlRecords(inputPath);
   }
-  const json = await readJsonFile(inputPath, null);
-  if (!json) {
+
+  if (await isMissingOrEmptyFile(inputPath)) {
     return [];
   }
-  return Array.isArray(json.conversations) ? json.conversations : [];
+
+  let text;
+  try {
+    text = await fs.readFile(inputPath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return [];
+    }
+    throw error;
+  }
+  if (!text.trim()) {
+    return [];
+  }
+
+  try {
+    const json = JSON.parse(text);
+    return Array.isArray(json.conversations) ? json.conversations : [];
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) {
+      throw error;
+    }
+    const jsonlPath = jsonlSiblingPath(inputPath);
+    let conversations = [];
+    try {
+      conversations = await readJsonlRecords(jsonlPath);
+    } catch (jsonlError) {
+      if (jsonlError?.code !== 'ENOENT') {
+        throw jsonlError;
+      }
+    }
+    if (conversations.length > 0) {
+      return conversations;
+    }
+    throw new Error(
+      `Corrupt daily export JSON with no usable .jsonl fallback: ${inputPath} (tried ${jsonlPath})`
+    );
+  }
 }
 
 async function loadProgress(inputPath) {
