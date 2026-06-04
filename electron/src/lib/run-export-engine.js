@@ -1,27 +1,19 @@
 import { spawn, execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import { getScriptsDir, getSkillRoot } from './paths.js';
 import { PAUSE_FILE, STOP_FILE } from './signal-files.js';
 import { DEFAULT_CDP } from './cdp-probe.js';
 import { getBundledNodeBin, runtimeExportEnv } from './runtime-paths.js';
-
-const scriptsLibDir = path.join(getScriptsDir(), 'lib');
-const exportJsonStats = await import(
-  pathToFileURL(path.join(scriptsLibDir, 'export-json-stats.js')).href
-);
-const failedRetryMeta = await import(
-  pathToFileURL(path.join(scriptsLibDir, 'failed-retry-meta.js')).href
-);
-const moderatePacedEnv = await import(
-  pathToFileURL(path.join(scriptsLibDir, 'moderate-paced-env.js')).href
-);
-
-const { countFailedConversations: countFailedFromLib, LARGE_JSON_BYTES } =
-  exportJsonStats;
-const { FAILED_RETRY_MAX, readFailedRetryPassesUsed } = failedRetryMeta;
-const { MODERATE_PACED_ENV } = moderatePacedEnv;
+import {
+  countFailedConversations as countFailedFromLib,
+  LARGE_JSON_BYTES
+} from './export-script-lib/export-json-stats.mjs';
+import {
+  FAILED_RETRY_MAX,
+  readFailedRetryPassesUsed
+} from './export-script-lib/failed-retry-meta.mjs';
+import { MODERATE_PACED_ENV } from './export-script-lib/moderate-paced-env.mjs';
 
 export function countFailedConversations(outputPath) {
   return countFailedFromLib(outputPath, getBundledNodeBin());
@@ -470,6 +462,76 @@ export function runTargetListByDayEngine(options, eventEmitter) {
   const handleLine = (line) => {
     const trimmed = line.trim();
     if (!trimmed) return;
+
+    if (trimmed.startsWith('{')) {
+      try {
+        const evt = JSON.parse(trimmed);
+        if (evt.event === 'export-paused') {
+          eventEmitter.emit('paused', {
+            message: evt.message || '导出已暂停'
+          });
+          return;
+        }
+        if (evt.event === 'export-resumed') {
+          eventEmitter.emit('resumed', {
+            message: evt.message || '导出已继续'
+          });
+          return;
+        }
+        if (evt.event === 'export-progress') {
+          if (typeof evt.message === 'string' && evt.message.startsWith('{')) {
+            try {
+              const inner = JSON.parse(evt.message);
+              if (inner.event === 'export-paused') {
+                eventEmitter.emit('paused', {
+                  message: inner.message || '导出已暂停'
+                });
+                return;
+              }
+              if (inner.event === 'export-resumed') {
+                eventEmitter.emit('resumed', {
+                  message: inner.message || '导出已继续'
+                });
+                return;
+              }
+            } catch {
+              /* 非嵌套控制事件 */
+            }
+          }
+          const hasStats =
+            typeof evt.current === 'number' ||
+            (typeof evt.total === 'number' && evt.total > 0);
+          eventEmitter.emit('progress', {
+            current: evt.current ?? 0,
+            total: evt.total ?? -1,
+            message: evt.message,
+            reset: Boolean(evt.reset),
+            unit:
+              evt.unit === 'conversation'
+                ? 'conversation'
+                : evt.unit === 'day'
+                  ? 'day'
+                  : 'employee',
+            phase:
+              evt.phase === 'retry-failed'
+                ? 'retry-failed'
+                : evt.phase === 'resume'
+                  ? 'resume'
+                  : null,
+            debug: evt.debug ?? null
+          });
+          if (hasStats || evt.message) {
+            return;
+          }
+        }
+        if (evt.event === 'export-error') {
+          return;
+        }
+      } catch {
+        /* 非 JSON */
+      }
+    }
+
     if (
       trimmed.startsWith('[') ||
       trimmed.startsWith('===') ||

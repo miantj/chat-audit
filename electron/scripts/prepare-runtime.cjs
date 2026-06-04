@@ -10,6 +10,7 @@
  *   node scripts/prepare-runtime.cjs --win-ia32 # win32 ia32
  *   node scripts/prepare-runtime.cjs --all     # darwin/win 常用架构（耗时长）
  *   node scripts/prepare-runtime.cjs --force   # 强制重新下载
+ *   node scripts/prepare-runtime.cjs --no-verify # 仅下载 Node，不校验（勿用于正式打包）
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -182,6 +183,20 @@ function fileSha256(filePath) {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
+function isPreflightFile(outPath) {
+  try {
+    return fs.statSync(outPath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function removeIfExists(targetPath) {
+  if (fs.existsSync(targetPath)) {
+    fs.rmSync(targetPath, { recursive: true, force: true });
+  }
+}
+
 function ensurePreflight(platform, arch) {
   const destDir = path.join(RUNTIME_ROOT, `python-${platform}-${arch}`);
   const outName = platform === 'win32' ? 'crm-preflight.exe' : 'crm-preflight';
@@ -196,7 +211,7 @@ function ensurePreflight(platform, arch) {
   const existingHash = fs.existsSync(sourceHashFile)
     ? fs.readFileSync(sourceHashFile, 'utf8').trim()
     : null;
-  if (!force && fs.existsSync(outPath) && existingHash === sourceHash) {
+  if (!force && isPreflightFile(outPath) && existingHash === sourceHash) {
     log(`crm-preflight 已存在: ${outPath}`);
     return;
   }
@@ -230,9 +245,10 @@ function ensurePreflight(platform, arch) {
   });
 
   const built = path.join(distDir, outName);
-  if (!fs.existsSync(built)) {
-    throw new Error(`PyInstaller 未生成 ${built}`);
+  if (!isPreflightFile(built)) {
+    throw new Error(`PyInstaller 未生成可执行文件: ${built}`);
   }
+  removeIfExists(outPath);
   fs.copyFileSync(built, outPath);
   if (process.platform !== 'win32') {
     fs.chmodSync(outPath, 0o755);
@@ -240,6 +256,91 @@ function ensurePreflight(platform, arch) {
   fs.writeFileSync(sourceHashFile, `${sourceHash}\n`);
   fs.rmSync(buildDir, { recursive: true, force: true });
   log(`crm-preflight 就绪: ${outPath}`);
+}
+
+function shouldIncludeTarget(platform, arch) {
+  if (platform === 'darwin' && arch === 'ia32') {
+    return false;
+  }
+  if (platform === 'win32' && !['x64', 'ia32'].includes(arch)) {
+    return false;
+  }
+  return true;
+}
+
+function nodeBinPath(platform, arch) {
+  const destDir = path.join(RUNTIME_ROOT, `node-${platform}-${arch}`);
+  return platform === 'win32'
+    ? path.join(destDir, 'node.exe')
+    : path.join(destDir, 'bin', 'node');
+}
+
+function preflightBinPath(platform, arch) {
+  const outName = platform === 'win32' ? 'crm-preflight.exe' : 'crm-preflight';
+  return path.join(RUNTIME_ROOT, `python-${platform}-${arch}`, outName);
+}
+
+function targetLabel(platform, arch) {
+  return `${platform}-${arch}`;
+}
+
+/** 打包前强制校验：本次 TARGETS 所需的 Node + crm-preflight 必须齐全 */
+function verifyRuntimeForPackaging(targets) {
+  if (process.argv.includes('--no-verify')) {
+    log('跳过打包前 runtime 校验（--no-verify，不可用于正式发布）');
+    return;
+  }
+
+  const missing = [];
+  const hints = new Set();
+
+  for (const [platform, arch] of targets) {
+    if (!shouldIncludeTarget(platform, arch)) {
+      continue;
+    }
+
+    const label = targetLabel(platform, arch);
+    const nodeBin = nodeBinPath(platform, arch);
+    if (!fs.existsSync(nodeBin)) {
+      missing.push(`内嵌 Node (${label}): ${nodeBin}`);
+    }
+
+    const preflight = preflightBinPath(platform, arch);
+    if (!isPreflightFile(preflight)) {
+      missing.push(`内嵌 crm-preflight (${label}): ${preflight}`);
+      if (platform !== process.platform || arch !== process.arch) {
+        hints.add(
+          `${label} 须在对应系统上构建（Win: node scripts/prepare-runtime.cjs --win-x64 --force；Mac: node scripts/prepare-runtime.cjs --force）`
+        );
+      } else if (!hasPyInstaller()) {
+        hints.add(
+          '请安装 Python 3 并执行: pip install pyinstaller websockets，再重新运行 prepare-runtime'
+        );
+      } else {
+        hints.add(
+          `请在本机执行: node scripts/prepare-runtime.cjs${
+            platform === 'win32' ? ' --win-x64' : ''
+          } --force`
+        );
+      }
+    }
+  }
+
+  if (missing.length === 0) {
+    return;
+  }
+
+  console.error('[prepare-runtime] 打包所需 runtime 不完整，已中止：');
+  for (const item of missing) {
+    console.error(`  - ${item}`);
+  }
+  if (hints.size > 0) {
+    console.error('[prepare-runtime] 处理建议：');
+    for (const hint of hints) {
+      console.error(`  - ${hint}`);
+    }
+  }
+  process.exit(1);
 }
 
 async function main() {
@@ -258,7 +359,8 @@ async function main() {
     ensurePreflight(platform, arch);
   }
 
-  log('完成。打包前请执行: cd electron && pnpm run build / build:mac');
+  verifyRuntimeForPackaging(TARGETS);
+  log('runtime 校验通过，可执行 pnpm run build / build:mac');
 }
 
 main().catch((err) => {

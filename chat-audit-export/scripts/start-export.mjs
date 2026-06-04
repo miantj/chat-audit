@@ -17,12 +17,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureCdpReady, DEFAULT_CDP } from './lib/cdp-bootstrap.mjs';
 import { resolveExportOutputPath } from './lib/export-path.js';
-import { countFailedConversations } from './lib/export-json-stats.js';
+import { countFailedConversations } from './lib/export-json-stats.mjs';
 import {
   FAILED_RETRY_MAX,
   readFailedRetryPassesUsed
-} from './lib/failed-retry-meta.js';
-import { MODERATE_PACED_ENV } from './lib/moderate-paced-env.js';
+} from './lib/failed-retry-meta.mjs';
+import { MODERATE_PACED_ENV } from './lib/moderate-paced-env.mjs';
 import { runPreflight } from './lib/run-preflight.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

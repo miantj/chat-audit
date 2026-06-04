@@ -13,7 +13,10 @@ import {
   applyFailedRetryPassEnv,
   FAILED_RETRY_MAX,
   retryPassStrategy
-} from './lib/failed-retry-meta.js';
+} from './lib/failed-retry-meta.mjs';
+import { isCdpUp } from './lib/cdp-bootstrap.mjs';
+import { formatExportError } from './lib/export-script-lib/format-export-error.mjs';
+import { readJsonFileSync } from './lib/export-script-lib/read-json-file.mjs';
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -80,6 +83,38 @@ function showUsage() {
   ].join('\n'));
 }
 
+let shutdownRequested = false;
+const PAUSE_FILE =
+  process.env.CHAT_AUDIT_PAUSE_FILE ||
+  path.join(os.tmpdir(), 'chat-audit-export-pause');
+const STOP_FILE =
+  process.env.CHAT_AUDIT_STOP_FILE ||
+  path.join(os.tmpdir(), 'chat-audit-export-stop');
+
+process.on('SIGTERM', () => {
+  shutdownRequested = true;
+  console.error(
+    JSON.stringify({
+      event: 'export-signal',
+      signal: 'SIGTERM',
+      message: '收到终止信号，完成当前对话后退出…'
+    })
+  );
+});
+process.on('SIGINT', () => {
+  shutdownRequested = true;
+  console.error(
+    JSON.stringify({
+      event: 'export-signal',
+      signal: 'SIGINT',
+      message: '收到中断信号，完成当前对话后退出…'
+    })
+  );
+});
+
+export { shutdownRequested, PAUSE_FILE, STOP_FILE };
+
+async function main() {
 const opts = parseArgs();
 
 if (opts.help || opts.h) {
@@ -174,21 +209,6 @@ if (targetsFile) {
   }
 }
 
-// Graceful shutdown state
-let shutdownRequested = false;
-const PAUSE_FILE =
-  process.env.CHAT_AUDIT_PAUSE_FILE ||
-  path.join(os.tmpdir(), 'chat-audit-export-pause');
-const STOP_FILE =
-  process.env.CHAT_AUDIT_STOP_FILE ||
-  path.join(os.tmpdir(), 'chat-audit-export-stop');
-
-process.on('SIGTERM', () => { shutdownRequested = true; console.error(JSON.stringify({event:'export-signal',signal:'SIGTERM',message:'收到终止信号，完成当前对话后退出…'})); });
-process.on('SIGINT', () => { shutdownRequested = true; console.error(JSON.stringify({event:'export-signal',signal:'SIGINT',message:'收到中断信号，完成当前对话后退出…'})); });
-
-// Export the shutdown flag for use in export-current-page.js
-export { shutdownRequested, PAUSE_FILE, STOP_FILE };
-
 const maxConversations = Number(opts.max || '2000');
 const maxRows = Number(opts['max-rows'] || '999999');
 const expectedCategory = (opts.category || '').trim();
@@ -262,7 +282,7 @@ if (retryFailed) {
     process.exit(0);
   }
   try {
-    const existingDataset = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    const existingDataset = readJsonFileSync(outputPath, null);
     const failedIds = existingDataset?.progress?.failed_conversation_ids || [];
     if (failedIds.length > 0) {
       retryFailedConversations = failedIds;
@@ -332,6 +352,22 @@ console.log(JSON.stringify({
   paceProfile
 }, null, 2));
 
+const cdpBase = (process.env.CHAT_AUDIT_CRM_CDP_BASE || 'http://localhost:9222').replace(
+  /\/$/,
+  ''
+);
+if (!(await isCdpUp(cdpBase))) {
+  console.error(
+    JSON.stringify({
+      event: 'export-error',
+      message:
+        `无法连接专用 Chrome 调试端口（${cdpBase}）。` +
+        '请回到应用确认专用 Chrome 已打开且 CRM 已登录后再试。'
+    })
+  );
+  process.exit(1);
+}
+
 try {
   const result = await exportCurrentPage({
     outputPath,
@@ -398,8 +434,19 @@ try {
   console.error(
     JSON.stringify({
       event: 'export-error',
-      message: error.message || String(error)
+      message: formatExportError(error)
     })
   );
   process.exit(1);
 }
+}
+
+main().catch((error) => {
+  console.error(
+    JSON.stringify({
+      event: 'export-error',
+      message: formatExportError(error)
+    })
+  );
+  process.exit(1);
+});

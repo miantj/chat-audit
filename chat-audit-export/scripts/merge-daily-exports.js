@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createEmptyDataset } from './lib/dataset.js';
+import { readJsonFile } from './lib/export-script-lib/read-json-file.mjs';
 import { appendJsonlRecord, readJsonlRecords } from './lib/jsonl-store.js';
 
 function parseArgs(argv = process.argv.slice(2)) {
@@ -179,8 +180,10 @@ async function loadConversations(inputPath) {
   if (/\.jsonl$/i.test(inputPath)) {
     return readJsonlRecords(inputPath);
   }
-  const text = await fs.readFile(inputPath, 'utf8');
-  const json = JSON.parse(text);
+  const json = await readJsonFile(inputPath, null);
+  if (!json) {
+    return [];
+  }
   return Array.isArray(json.conversations) ? json.conversations : [];
 }
 

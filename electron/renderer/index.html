@@ -1,119 +1,279 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
   <title>聊天审计导出工具</title>
   <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
-  <div class="container">
-    <header>
-      <h1>聊天审计导出工具</h1>
-      <p class="subtitle">请仅在应用弹出的专用 Chrome 中登录；关闭后重开仍会保留登录状态，日常 Chrome 的登录无效</p>
+  <div class="app">
+    <header class="app-header">
+      <div class="app-brand">
+        <div class="app-logo" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <rect x="4" y="5" width="16" height="12" rx="2.5" fill="currentColor" fill-opacity="0.18"
+              stroke="currentColor" stroke-width="1.6" />
+            <path d="M8 10h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          </svg>
+        </div>
+        <div>
+          <h1>聊天审计导出工具</h1>
+          <p class="app-subtitle">请仅在应用弹出的专用 Chrome 中登录；关闭后重开仍会保留登录状态，日常 Chrome 的登录无效</p>
+        </div>
+      </div>
+      <div class="header-status">
+        <span class="dev-badge is-hidden" id="devBadge">DEV</span>
+        <div class="status-pill">
+          <span class="status-dot status-dot--info" id="crmStatusDot"></span>
+          <span id="crmStatusText">CRM 检测中</span>
+        </div>
+        <div class="status-pill">
+          <span class="status-dot status-dot--info" id="wxStatusDot"></span>
+          <span id="wxStatusText">企微检测中</span>
+        </div>
+      </div>
     </header>
 
-    <main>
-      <div class="form-section">
-        <div class="form-group date-form-group">
-          <div class="date-header">
-            <label>导出日期</label>
-            <div class="date-presets">
-              <button type="button" class="btn-preset" data-preset="yesterday">昨天</button>
-              <button type="button" class="btn-preset" data-preset="today">今天</button>
+    <main class="app-main">
+      <section class="panel panel-settings">
+        <div class="panel-head">
+          <h2>导出设置</h2>
+        </div>
+
+        <div class="form-section">
+          <div class="form-step">
+            <div class="form-group date-form-group">
+              <div class="date-header">
+                <h3 class="step-title">1. 日期</h3>
+                <div class="date-presets">
+                    <button type="button" class="btn-preset" data-preset="yesterday">昨天</button>
+                    <button type="button" class="btn-preset" data-preset="today">今天</button>
+                  </div>
+                </div>
+                <div class="date-range-row">
+                  <input type="date" id="startDate" aria-label="开始日期">
+                  <span class="date-range-label">至</span>
+                  <input type="date" id="endDate" aria-label="结束日期">
+                </div>
+                <label class="inline-check">
+                  <input type="checkbox" id="singleDayMode" checked>
+                  单日导出（开始与结束为同一天）
+                </label>
             </div>
           </div>
-          <div class="date-range-row">
-            <input type="date" id="startDate" aria-label="开始日期">
-            <span class="date-range-label">至</span>
-            <input type="date" id="endDate" aria-label="结束日期">
+
+          <div class="form-step">
+            <div class="form-group">
+              <h3 class="step-title">2. 导出模式</h3>
+                <div class="segmented-control export-mode-row" role="radiogroup" aria-label="导出模式">
+                  <label class="segment-option">
+                    <input type="radio" name="exportMode" value="effective" checked>
+                    <span>有效客户</span>
+                  </label>
+                  <label class="segment-option">
+                    <input type="radio" name="exportMode" value="all">
+                    <span>全部好友</span>
+                  </label>
+                  <label class="segment-option">
+                    <input type="radio" name="exportMode" value="targetList">
+                    <span>目标名单</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="target-list-section is-hidden" id="targetListSection">
+                <div class="file-chip-row">
+                  <div class="file-chip" id="targetFileChip">
+                    <span class="file-chip-icon" aria-hidden="true">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Z" fill="#E8F5E9"
+                          stroke="#43A047" stroke-width="1.2" />
+                        <path d="M14 2v6h6" stroke="#43A047" stroke-width="1.2" />
+                        <path d="M8 13h8M8 16h5" stroke="#43A047" stroke-width="1.2" stroke-linecap="round" />
+                      </svg>
+                    </span>
+                    <span class="file-chip-name" id="targetFileName">未选择文件</span>
+                  </div>
+                  <button type="button" id="selectTargetsFile" class="btn-link">更换</button>
+                </div>
+                <input type="hidden" id="targetsFile">
+
+                <div class="advanced-match">
+                  <div class="advanced-match-head">高级匹配</div>
+                  <div class="target-list-options">
+                    <div class="target-list-option-block">
+                      <div class="label-with-hint">
+                        <label for="targetsSheet">工作表</label>
+                        <button type="button" class="field-hint-trigger" aria-label="工作表说明">
+                          <svg class="field-hint-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                            <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.25" />
+                            <text x="8" y="11.5" text-anchor="middle" font-size="10" font-weight="600"
+                              fill="currentColor">i</text>
+                          </svg>
+                          <span class="field-hint-tooltip" role="tooltip">
+                            仅 Excel（.xlsx）需要填写：留空则读取第一个工作表；填写时须与文件底部标签名完全一致（例如 Sheet1）。CSV 没有工作表概念，可忽略此项。
+                          </span>
+                        </button>
+                      </div>
+                      <input type="text" id="targetsSheet" placeholder="第一个工作表">
+                    </div>
+                    <div class="target-list-option-block">
+                      <div class="label-with-hint">
+                        <label for="targetListStrategy">策略</label>
+                        <button type="button" class="field-hint-trigger" aria-label="匹配策略说明">
+                          <svg class="field-hint-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                            <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.25" />
+                            <text x="8" y="11.5" text-anchor="middle" font-size="10" font-weight="600"
+                              fill="currentColor">i</text>
+                          </svg>
+                          <span class="field-hint-tooltip" role="tooltip">
+                            决定在员工弹窗「外部好友」里如何找到名单中的客户。<br><br>
+                            <b>可见好友交集（推荐）</b>：按当前导出日期翻页扫描可见好友列表，只导出「名单里有且当天列表里能看到」的外部客户 ID；跨多日导出更快。<br><br>
+                            <b>逐个 ID 搜索</b>：对每个外部客户 ID 在搜索框中查找并选中，速度较慢，适合可见列表扫不到、但必须按 ID 精确查找时。
+                          </span>
+                        </button>
+                      </div>
+                      <select id="targetListStrategy">
+                        <option value="visible">可见好友交集 visible</option>
+                        <option value="search">逐个 ID 搜索</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
           </div>
-          <label class="inline-check">
-            <input type="checkbox" id="singleDayMode" checked>
-            单日导出（开始与结束为同一天）
-          </label>
-        </div>
 
-        <div class="form-group">
-          <label>导出模式</label>
-          <div class="export-mode-row">
-            <label class="inline-check">
-              <input type="radio" name="exportMode" value="effective" checked>
-              有效指标客户（默认）
-            </label>
-            <label class="inline-check">
-              <input type="radio" name="exportMode" value="all">
-              全部外部好友
-            </label>
-            <label class="inline-check">
-              <input type="radio" name="exportMode" value="targetList">
-              目标名单（Excel/CSV）
-            </label>
-          </div>
-        </div>
-
-        <div class="form-group target-list-section is-hidden" id="targetListSection">
-          <label for="targetsFile">目标名单文件</label>
-          <p class="field-hint">须含「负责人」「外部客户ID」列；跨多日时将按天导出并自动合并</p>
-          <div class="input-with-button">
-            <input type="text" id="targetsFile" readonly placeholder="选择 .xlsx 或 .csv 文件">
-            <button type="button" id="selectTargetsFile" class="btn-secondary">选择</button>
-          </div>
-          <div class="target-list-options">
-            <label for="targetsSheet">工作表（可选）</label>
-            <input type="text" id="targetsSheet" placeholder="留空则读取第一个工作表">
-            <label for="targetListStrategy">匹配策略</label>
-            <select id="targetListStrategy">
-              <option value="visible">可见好友交集（推荐，跨日期更快）</option>
-              <option value="search">逐个 ID 搜索</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label for="department">部门</label>
-          <select id="department">
-            <option value="大客私域顾问-总">大客私域顾问-总</option>
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label for="outputDir">输出目录</label>
-          <div class="input-with-button">
-            <input type="text" id="outputDir" readonly placeholder="选择输出目录">
-            <button type="button" id="selectDir" class="btn-secondary">选择</button>
-          </div>
-        </div>
-
-      </div>
-
-      <div class="button-group">
-        <button type="button" id="startBtn" class="btn-primary">开始导出</button>
-        <button type="button" id="pauseBtn" class="btn-secondary" disabled>暂停</button>
-        <button type="button" id="resumeBtn" class="btn-secondary" disabled>继续</button>
-        <button type="button" id="stopBtn" class="btn-danger" disabled>停止</button>
-      </div>
-
-      <div class="status-section">
-        <div class="status-panel" id="statusPanel">
-          <div id="statusBar" class="status-bar-text">就绪</div>
-          <div class="status-progress is-hidden" id="statusProgress">
-            <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressBar">
-              <div id="progressFill" class="progress-fill"></div>
-              <span id="progressPercentLabel" class="progress-percent-label" aria-hidden="true">0%</span>
+          <div class="form-step">
+            <div class="form-group">
+              <h3 class="step-title">3. 部门</h3>
+              <select id="department" aria-label="部门">
+                  <option value="大客私域顾问-总">大客私域顾问-总</option>
+                </select>
             </div>
-            <span id="progressText" class="progress-text">员工 —</span>
+          </div>
+
+          <div class="form-step">
+            <div class="form-group">
+              <h3 class="step-title">4. 保存到</h3>
+                <div class="input-with-button">
+                  <input type="text" id="outputDir" readonly placeholder="选择输出目录" aria-label="保存到">
+                  <button type="button" id="selectDir" class="btn-secondary">选择</button>
+                </div>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="log-section">
-        <div id="logContent" class="log-content"></div>
+        <div class="settings-actions">
+          <button type="button" id="startBtn" class="btn-primary btn-block">开始导出</button>
+          <div class="secondary-actions">
+            <button type="button" id="checkBtn" class="btn-secondary btn-with-icon">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M2 4h12M2 8h12M2 12h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+              </svg>
+              检查条件
+            </button>
+            <button type="button" id="pauseBtn" class="btn-secondary" disabled>暂停</button>
+            <button type="button" id="resumeBtn" class="btn-secondary is-hidden" disabled>继续</button>
+            <button type="button" id="stopBtn" class="btn-secondary btn-with-icon" disabled>
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="4" y="4" width="8" height="8" rx="1" fill="currentColor" />
+              </svg>
+              停止
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <div class="panel-column-right">
+        <section class="panel panel-task-main">
+          <div class="panel-head">
+            <h2>任务</h2>
+          </div>
+
+          <div class="task-card">
+            <div class="task-status-card">
+              <div class="task-progress-row">
+                <div class="circular-progress" id="exportProgressRing" role="progressbar" aria-valuemin="0"
+                  aria-valuemax="100" aria-valuenow="0" aria-label="导出进度">
+                  <svg viewBox="0 0 120 120" aria-hidden="true">
+                    <circle class="circular-track" cx="60" cy="60" r="52" />
+                    <circle class="circular-fill" id="circularFill" cx="60" cy="60" r="52" />
+                  </svg>
+                  <span class="circular-label" id="circularPercent">0%</span>
+                </div>
+                <div class="task-status">
+                  <div id="statusBar" class="status-bar-text">就绪</div>
+                  <p class="task-hint" id="taskHint">请仅在应用弹出的专用 Chrome 中登录；关闭后重开仍会保留登录状态，日常 Chrome 的登录无效</p>
+                  <p class="task-progress-caption" id="progressText">员工 —</p>
+                </div>
+              </div>
+              <div class="task-actions is-hidden" id="wxLoginActions">
+                <button type="button" class="btn-primary btn-sm" id="wxScannedBtn">我已扫码</button>
+              </div>
+            </div>
+
+            <div class="stepper" id="workflowStepper" aria-label="导出流程">
+              <div class="stepper-item" data-step="chrome">
+                <span class="stepper-dot"></span>
+                <span class="stepper-label">Chrome</span>
+              </div>
+              <div class="stepper-line"></div>
+              <div class="stepper-item" data-step="crm">
+                <span class="stepper-dot"></span>
+                <span class="stepper-label">CRM</span>
+              </div>
+              <div class="stepper-line"></div>
+              <div class="stepper-item" data-step="conditions">
+                <span class="stepper-dot"></span>
+                <span class="stepper-label">条件</span>
+              </div>
+              <div class="stepper-line"></div>
+              <div class="stepper-item" data-step="gate">
+                <span class="stepper-dot"></span>
+                <span class="stepper-label">门禁</span>
+              </div>
+              <div class="stepper-line"></div>
+              <div class="stepper-item" data-step="export">
+                <span class="stepper-dot"></span>
+                <span class="stepper-label">导出</span>
+              </div>
+            </div>
+
+            <div class="stats-grid">
+              <div class="stat-card stat-card--primary">
+                <span class="stat-label">已处理</span>
+                <span class="stat-value" id="statProcessed"><span class="stat-value-num">0</span></span>
+              </div>
+              <div class="stat-card stat-card--success">
+                <span class="stat-label">成功</span>
+                <span class="stat-value" id="statSuccess">0</span>
+              </div>
+              <div class="stat-card stat-card--error">
+                <span class="stat-label">错误</span>
+                <span class="stat-value" id="statError">0</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel-events">
+          <div class="events-head">
+            <h3>最近事件</h3>
+          </div>
+          <div class="log-section" id="logSection">
+            <div id="logContent" class="log-content"></div>
+          </div>
+        </section>
       </div>
     </main>
   </div>
 
   <script src="renderer.js"></script>
 </body>
+
 </html>

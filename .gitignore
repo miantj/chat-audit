@@ -22,6 +22,7 @@ build/
 dist/
 electron/dist/
 electron/runtime/
+electron/src/lib/export-script-lib/
 
 # Node（若日后在 scripts 下 npm install）
 node_modules/
@@ -66,3 +67,7 @@ chat-audit-*.jsonl
 chat-audit-*.business.csv
 chat-audit-*.failed-retry-meta.json
 chat-audit-*.json.done
+.cursor/pre-push-review.json
+.vscode/settings.json
+.cursor/pre-push-find-bugs-last.md
+*.xlsx

@@ -2,6 +2,48 @@
 
 面向 **64 位 Win7+** 的 Electron 安装包。现象 → 命令，少叙述。
 
+## 为什么「pnpm build 一直成功」却装后很多错？
+
+**两类问题，不要混在一起：**
+
+| 类型 | 何时出现 | 典型报错 | 是否代码回归 |
+|------|----------|----------|--------------|
+| **A. 构建机环境** | 执行 `pnpm build` 时 | NSIS 下载 `EOF`、winCodeSign 符号链接、Electron 404 | ❌ 网络/权限，与业务代码无关 |
+| **B. 安装包运行时** | 安装后启动 / 点导出 | `export-json-stats`、ESM/CJS、`ERR_MODULE_NOT_FOUND` | ⚠️ 自 electron 首版就存在的架构隐患，开发态不易发现 |
+
+**B 类根因（git `3a3fd66` 首版即有）：**
+
+安装包内是**两套独立目录**：
+
+```text
+resources/
+  app.asar.unpacked/     ← Electron 主进程（main.mjs、src/lib/…）
+  scripts/               ← extraResources 拷贝的 chat-audit-export/scripts（给子进程 node 用）
+```
+
+旧版 `run-export-engine.js` 在**主进程启动时**从 `resources/scripts/lib/*.js` 做 `dynamic import`，想复用 CLI 脚本里的工具函数。
+
+| 环境 | `scripts/lib/*.js` 如何解析 | 结果 |
+|------|------------------------------|------|
+| 开发 `pnpm start` | 路径在 `chat-audit-export/scripts/`，上级有 `package.json` `"type":"module"` | ✅ 正常 |
+| 安装版 | 只有 `resources/scripts/`，**没有**上级 `package.json` | ❌ `.js` 当 CJS → `Cannot use import statement outside a module` |
+
+因此：**构建成功 ≠ 安装版主进程能加载导出逻辑**。`bootstrap.log` 里先出现 `resolveMainEntry ok`，约 0.5s 后仍可能在加载 `run-export-engine` 时失败（bootstrap 只表示找到了 `main.mjs`，不表示应用已完全启动）。
+
+**当前修复（须拉最新并重打包）：**
+
+1. `prebuild` 跑 `sync-export-lib.cjs`，把 4 个公共 `.mjs` 拷进 `electron/src/lib/export-script-lib/`
+2. 主进程**静态 import** 上述目录（随 `app.asar.unpacked` 打包，不再依赖 `resources/scripts`）
+3. `resources/scripts` 仍只给 **子进程** `export-with-self-heal.mjs` 等使用
+
+**装后必查（B 类）：**
+
+```bat
+dir "%LOCALAPPDATA%\Programs\ChatAuditExport\resources\app.asar.unpacked\src\lib\export-script-lib\export-json-stats.mjs"
+```
+
+有文件 → 主进程路径正确；没有 → 用了旧代码或未跑 `sync-export-lib` 的构建。
+
 ## 版本与产物
 
 | 项 | 值 |
@@ -11,7 +53,7 @@
 | 架构 | 仅 `x64` |
 | 主进程 | `main.cjs` → `app.asar.unpacked/main.mjs` |
 | 预检 Python | **3.8.x 64 位** 打 PyInstaller（勿用 3.14） |
-| 安装包 | `dist\一手聊天审计导出 Setup 1.0.0.exe` |
+| 安装包 | `dist\一手聊天审计导出 Setup *.exe`（版本见 `electron/package.json`） |
 | 绿色版 | `dist\win-unpacked\ChatAuditExport.exe` |
 | 日志 | `%APPDATA%\chat-audit-export\logs\`（`bootstrap.log` / `main.log`） |
 
@@ -38,15 +80,26 @@ py -3.8 -m pip install pyinstaller websockets
 node scripts\prepare-runtime.cjs --win-x64 --force
 runtime\python-win32-x64\crm-preflight.exe --help
 
-:: 打包
+:: 打包（prebuild 含 sync-export-lib + copy-ws）
 rmdir /s /q dist
 pnpm build
 
-:: 本机验证
+:: 本机验证（须能打开窗口且 bootstrap 无 export-json-stats 报错）
 dist\win-unpacked\ChatAuditExport.exe --enable-logging
+dir dist\win-unpacked\resources\app.asar.unpacked\src\lib\export-script-lib\export-json-stats.mjs
+type "%APPDATA%\chat-audit-export\logs\bootstrap.log"
 ```
 
-**安装给用户：** 只发 `dist\一手聊天审计导出 Setup 1.0.0.exe`，勿只拷单个 exe。
+**安装给用户：** 只发 `dist\一手聊天审计导出 Setup *.exe`，勿只拷单个 exe。
+
+**构建机目录（须完整仓库，不能只有 electron 文件夹）：**
+
+```text
+chat-audit-export-electron/
+  electron/              ← 在此 pnpm build
+  chat-audit-export/
+    scripts/lib/*.mjs    ← sync-export-lib 源
+```
 
 **重装前清残留：**
 
@@ -61,6 +114,8 @@ rmdir /s /q "%LOCALAPPDATA%\Programs\一手聊天审计导出"
 
 | 日志 / 现象 | 节 |
 |-------------|-----|
+| `pnpm build` 成功但装后 `export-json-stats` 报错 | [根因说明](#为什么pnpm-build-一直成功却装后很多错) · [B1](#b1-主进程打包) |
+| NSIS / `nsis-3.0.4.1.7z` 下载 `EOF` | [A5](#a5-nsis-下载) |
 | `node-v22...-win32-x64.zip` HTTP 404 | [A1](#a1-node-404) |
 | `Cannot create symbolic link` / winCodeSign | [A2](#a2-winCodeSign) |
 | `Electron failed to install correctly` | [A3](#a3-electron-安装) |
@@ -138,6 +193,22 @@ pnpm 11 另需 `electron/pnpm-workspace.yaml` 含 `allowBuilds: electron: true`�
 - Electron 须 **22.x**，且安装包为 **x64**
 - 分发 **Setup.exe** 或整个 `win-unpacked`，勿只拷 `ChatAuditExport.exe`
 
+### A5 NSIS 下载 {#a5-nsis-下载}
+
+```text
+Get "https://github.com/.../nsis-3.0.4.1.7z": EOF
+```
+
+打包已在 `win-unpacked` 阶段完成，**仅安装包（Setup.exe）步骤失败**，属 GitHub 网络中断，非代码问题。
+
+```bat
+set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
+rmdir /s /q "%LOCALAPPDATA%\electron-builder\Cache\nsis"
+pnpm build
+```
+
+急用：直接发 `dist\win-unpacked\` 整目录或 zip；或 `pnpm run build:dir` 跳过 NSIS。
+
 ---
 
 ## B. 打包后启动
@@ -153,7 +224,9 @@ type "%APPDATA%\chat-audit-export\logs\bootstrap.log"
 | bootstrap / 报错 | 处理 |
 |------------------|------|
 | `ERR_MODULE_NOT_FOUND` … `main.js` | 拉最新代码；`build.files` 须含 `main.mjs`；`pnpm build` |
-| `Cannot use import statement outside a module` | 入口须 **`main.mjs`**，勿 `main.js` |
+| `Cannot use import statement outside a module` … `main.js` | 入口须 **`main.mjs`**，勿 `main.js` |
+| `Cannot use import statement outside a module` … `resources\scripts\lib\*.js` | 主进程已改从 **`app.asar.unpacked\src\lib\export-script-lib\`** 静态加载；`prebuild` 会跑 `sync-export-lib.cjs` |
+| `ERR_MODULE_NOT_FOUND` … `resources\scripts\lib\export-json-stats.mjs` | 旧包主进程仍从 extraResources 加载；拉最新并重打包（须含 `sync-export-lib`） |
 | `Cannot find package 'electron-log'` | 须 **v4**：`unpacked/main.mjs` + `createRequire(app.asar/package.json)` |
 | `Cannot find module '...\app.asar\main.mjs'` | 勿从 asar 做 dynamic import；须 **unpacked-first** |
 | `chosen=...\main.js`（旧包） | 未同步代码或未重装；见 [B2](#b2-安装版无反应) |
@@ -164,6 +237,7 @@ type "%APPDATA%\chat-audit-export\logs\bootstrap.log"
 ```bat
 dir "%LOCALAPPDATA%\Programs\ChatAuditExport\resources\app.asar.unpacked\main.mjs"
 dir "%LOCALAPPDATA%\Programs\ChatAuditExport\resources\app.asar.unpacked\package.json"
+dir "%LOCALAPPDATA%\Programs\ChatAuditExport\resources\app.asar.unpacked\src\lib\export-script-lib\export-json-stats.mjs"
 ```
 
 **开发机对比：**

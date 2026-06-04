@@ -15,7 +15,7 @@ import { resolveExportOutputPath } from './lib/export-path.js';
 import {
   countFailedConversations,
   LARGE_JSON_BYTES
-} from './lib/export-json-stats.js';
+} from './lib/export-json-stats.mjs';
 import { ensureCdpReady, isCdpUp } from './lib/cdp-bootstrap.mjs';
 import { logCdpWebSocketBootstrap } from './lib/cdp.js';
 import {
@@ -25,7 +25,7 @@ import {
   readFailedRetryPassesUsed,
   retryPassStrategy,
   writeFailedRetryPassesUsed
-} from './lib/failed-retry-meta.js';
+} from './lib/failed-retry-meta.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_DIR = __dirname;

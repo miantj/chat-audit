@@ -32,7 +32,8 @@ import {
   createEmptyDataset,
   upsertDatasetConversation
 } from './lib/dataset.js';
-import { getDomPaceConfig } from './lib/dom-pace-config.js';
+import { getDomPaceConfig } from './lib/dom-pace-config.mjs';
+import { readJsonFile } from './lib/export-script-lib/read-json-file.mjs';
 import { groupTargetsByOwner, normalizeOwnerName, TARGET_FILE_CATEGORY } from './lib/target-list.js';
 
 let WAIT_MS = 1200;
@@ -543,16 +544,9 @@ async function waitForMessageDomChange(
 }
 
 async function loadDataset(filePath, jsonlPath) {
-  let dataset;
-  try {
-    const text = await fs.readFile(filePath, 'utf8');
-    dataset = JSON.parse(text);
-  } catch (error) {
-    if (error && error.code === 'ENOENT') {
-      dataset = createEmptyDataset();
-    } else {
-      throw error;
-    }
+  let dataset = await readJsonFile(filePath, null);
+  if (!dataset) {
+    dataset = createEmptyDataset();
   }
 
   const jsonlRecords = await readJsonlRecords(jsonlPath);
@@ -2218,6 +2212,7 @@ export async function exportCurrentPage({
   const domPaceConfig = getDomPaceConfig();
 
   const paceStats = {};
+  let skippedConversationCount = 0;
   const dataset = await loadDataset(outputPath, jsonlPath);
   let activeRetryList = Array.isArray(retryFailedConversations)
     ? retryFailedConversations
@@ -2230,6 +2225,16 @@ export async function exportCurrentPage({
   }
   const isRetryFailedPass =
     Array.isArray(activeRetryList) && activeRetryList.length > 0;
+
+  function skipIfAlreadyDone(conversationId) {
+    if (!conversationAlreadyDone(dataset, conversationId)) {
+      return false;
+    }
+    skippedConversationCount += 1;
+    log(`[conversation] skip already completed ${conversationId}`);
+    return true;
+  }
+
   progressDebug(log, 'export-init', {
     isRetryFailedPass,
     retryEnv: process.env.CHAT_AUDIT_RETRY_FAILED === '1',
@@ -2614,7 +2619,7 @@ export async function exportCurrentPage({
                 continue;
               }
 
-              if (conversationAlreadyDone(dataset, conversationId)) {
+              if (skipIfAlreadyDone(conversationId)) {
                 continue;
               }
 
@@ -2906,8 +2911,7 @@ export async function exportCurrentPage({
                 };
                 const conversationId = `${row.employeeName}__customer_${target.customerId}`;
                 matchedVisibleCount += 1;
-                if (conversationAlreadyDone(dataset, conversationId)) {
-                  log(`[conversation] skip already completed ${conversationId}`);
+                if (skipIfAlreadyDone(conversationId)) {
                   continue;
                 }
 
@@ -3188,7 +3192,7 @@ export async function exportCurrentPage({
 
             checkpointReached = true;
             const conversationId = `${row.employeeName}__customer_${target.customerId}`;
-            if (conversationAlreadyDone(dataset, conversationId)) {
+            if (skipIfAlreadyDone(conversationId)) {
               continue;
             }
 
@@ -3532,7 +3536,7 @@ export async function exportCurrentPage({
 
             checkpointReached = true;
             const conversationId = `${row.employeeName}__customer_${target.customerId}`;
-            if (conversationAlreadyDone(dataset, conversationId)) {
+            if (skipIfAlreadyDone(conversationId)) {
               continue;
             }
             if (
@@ -3955,6 +3959,7 @@ export async function exportCurrentPage({
       );
     }
     if (notAttempted.length > 0) {
+      skippedConversationCount += notAttempted.length;
       log(
         `[retry-failed] ${notAttempted.length} conversation(s) not found in metric tables this run (skipped): ${notAttempted.join('; ')}`
       );
@@ -3993,6 +3998,7 @@ export async function exportCurrentPage({
     conversations: dataset.conversations.length,
     completed: dataset.progress.completed_conversation_ids.length,
     failed: dataset.progress.failed_conversation_ids.length,
+    skipped: skippedConversationCount,
     outputPath,
     employeeProgressCurrent,
     employeeProgressTotal,

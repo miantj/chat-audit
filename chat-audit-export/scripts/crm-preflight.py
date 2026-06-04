@@ -14,6 +14,7 @@ import base64
 import json
 import os
 import sys
+from datetime import date
 import urllib.parse
 import urllib.request
 from typing import Any, Optional
@@ -394,6 +395,230 @@ async def cmd_check_dates(cdp_base: str) -> None:
     print(f"Current date inputs: {raw}")
 
 
+def _date_picker_action_expr(action: str, year: int, month: int, day: int) -> str:
+    action_js = json.dumps(action)
+    return f"""
+(function(){{
+    var action = {action_js};
+    var targetYear = {year};
+    var targetMonth = {month};
+    var targetDay = {day};
+
+    function panelYM(panel) {{
+        if (!panel) return null;
+        var divs = panel.querySelectorAll('.el-date-range-picker__header div');
+        for (var i = 0; i < divs.length; i++) {{
+            var t = (divs[i].innerText || '').replace(/\\s+/g, '');
+            var m = t.match(/^(\\d{{4}})年(\\d{{1,2}})月$/);
+            if (m) return {{y: parseInt(m[1], 10), mo: parseInt(m[2], 10)}};
+        }}
+        var header = panel.querySelector('.el-date-range-picker__header');
+        if (header) {{
+            var m2 = (header.innerText || '').match(/(\\d{{4}})\\s*年\\s*(\\d{{1,2}})\\s*月/);
+            if (m2) return {{y: parseInt(m2[1], 10), mo: parseInt(m2[2], 10)}};
+        }}
+        return null;
+    }}
+
+    function getPanels() {{
+        var all = document.querySelectorAll('.el-date-range-picker__content');
+        var left = document.querySelector('.el-date-range-picker__content.is-left');
+        var right = document.querySelector('.el-date-range-picker__content.is-right');
+        if (!left && all.length) left = all[0];
+        if (!right && all.length > 1) right = all[all.length - 1];
+        if (!right) right = left;
+        return {{ left: left, right: right }};
+    }}
+
+    function clickNavBtn(panel, dir) {{
+        if (!panel) return false;
+        var header = panel.querySelector('.el-date-range-picker__header');
+        if (!header) return false;
+        // Element UI: left panel has prev-month btn; right panel has next-month btn.
+        var selectors = dir > 0
+            ? ['.el-icon-arrow-right', 'button.el-icon-arrow-right', '.el-picker-panel__icon-btn.el-icon-arrow-right']
+            : ['.el-icon-arrow-left', 'button.el-icon-arrow-left', '.el-picker-panel__icon-btn.el-icon-arrow-left'];
+        for (var si = 0; si < selectors.length; si++) {{
+            var el = header.querySelector(selectors[si]);
+            if (!el) continue;
+            var btn = el.tagName === 'BUTTON' ? el : (el.closest ? el.closest('button') : null);
+            if (btn) {{ btn.click(); return true; }}
+            el.click();
+            return true;
+        }}
+        return false;
+    }}
+
+    function clickNavDir(dir) {{
+        var panels = getPanels();
+        var panel = dir > 0 ? panels.right : panels.left;
+        return clickNavBtn(panel, dir);
+    }}
+
+    function findPanelForMonth() {{
+        var panels = document.querySelectorAll('.el-date-range-picker__content');
+        for (var i = 0; i < panels.length; i++) {{
+            var cur = panelYM(panels[i]);
+            if (cur && cur.y === targetYear && cur.mo === targetMonth) return panels[i];
+        }}
+        return null;
+    }}
+
+    function cellDayNum(cell) {{
+        var el = cell.querySelector('span') || cell.querySelector('div');
+        var raw = el ? (el.innerText || el.textContent || '') : (cell.innerText || cell.textContent || '');
+        raw = String(raw).replace(/\\s+/g, '').trim();
+        var n = parseInt(raw, 10);
+        return isNaN(n) ? -1 : n;
+    }}
+
+    function isOtherMonth(cell) {{
+        return cell.classList.contains('prev-month') || cell.classList.contains('next-month');
+    }}
+
+    function clickDayInPanel(panel) {{
+        var disabledMatch = false;
+        var cells = panel.querySelectorAll('tbody td, td');
+        for (var i = 0; i < cells.length; i++) {{
+            var cell = cells[i];
+            if (isOtherMonth(cell)) continue;
+            if (cellDayNum(cell) !== targetDay) continue;
+            if (cell.classList.contains('disabled')) {{
+                disabledMatch = true;
+                continue;
+            }}
+            if (!cell.classList.contains('available') && !cell.classList.contains('today')) {{
+                continue;
+            }}
+            var span = cell.querySelector('span');
+            if (span) span.click();
+            else cell.click();
+            return 'clicked day ' + targetDay;
+        }}
+        if (disabledMatch) {{
+            return 'day ' + targetDay + ' disabled (CRM 不可选，通常为未来日期或超出允许范围)';
+        }}
+        return 'day ' + targetDay + ' not found';
+    }}
+
+    function clickDayInAnyPanel() {{
+        var panels = document.querySelectorAll('.el-date-range-picker__content');
+        for (var i = 0; i < panels.length; i++) {{
+            var cur = panelYM(panels[i]);
+            if (!cur || cur.y !== targetYear || cur.mo !== targetMonth) continue;
+            var click = clickDayInPanel(panels[i]);
+            if (click.indexOf('clicked') === 0) {{
+                return {{ok: true, click: click, month: cur}};
+            }}
+            if (click.indexOf('disabled') > 0) {{
+                return {{ok: false, click: click, month: cur}};
+            }}
+        }}
+        return {{ok: false, click: 'day ' + targetDay + ' not found in any panel', month: null}};
+    }}
+
+    if (action === 'navigate-once') {{
+        var hit = findPanelForMonth();
+        if (hit) {{
+            return JSON.stringify({{ok: true, done: true, nav: 'found', month: panelYM(hit)}});
+        }}
+        var panels = getPanels();
+        if (!panels.left) return JSON.stringify({{ok: false, reason: 'no panel'}});
+        var cur = panelYM(panels.left);
+        if (!cur) return JSON.stringify({{ok: false, reason: 'cannot parse header'}});
+        var curIdx = cur.y * 12 + cur.mo;
+        var tgtIdx = targetYear * 12 + targetMonth;
+        if (curIdx === tgtIdx) {{
+            return JSON.stringify({{ok: true, done: true, nav: 'ok', month: cur}});
+        }}
+        var dir = curIdx < tgtIdx ? 1 : -1;
+        if (!clickNavDir(dir)) {{
+            return JSON.stringify({{ok: false, reason: 'nav click failed', month: cur, dir: dir}});
+        }}
+        return JSON.stringify({{
+            ok: true,
+            done: false,
+            nav: 'step',
+            month: cur,
+            dir: dir,
+            target: {{y: targetYear, mo: targetMonth}}
+        }});
+    }}
+
+    if (action === 'click-day') {{
+        var result = clickDayInAnyPanel();
+        if (!result.month) {{
+            var panels2 = getPanels();
+            var cur2 = panelYM(panels2.left);
+            return JSON.stringify({{
+                ok: false,
+                reason: 'target month not visible',
+                month: cur2,
+                click: result.click
+            }});
+        }}
+        return JSON.stringify({{ok: result.ok, click: result.click, month: result.month}});
+    }}
+
+    return JSON.stringify({{ok: false, reason: 'unknown action: ' + action}});
+}})()
+"""
+
+
+async def _navigate_calendar_to_month(
+    sess: Any, year: int, month: int, day: int, date_str: str
+) -> None:
+    """One month step per CDP round-trip so Vue can update the picker DOM."""
+    nav_expr = _date_picker_action_expr("navigate-once", year, month, day)
+    last_key: Optional[tuple[int, int]] = None
+    stuck = 0
+    last_result: dict[str, Any] = {}
+
+    for attempt in range(60):
+        nav_raw = await sess.evaluate(nav_expr)
+        try:
+            last_result = json.loads(nav_raw)
+        except json.JSONDecodeError:
+            last_result = {"ok": False, "reason": nav_raw}
+
+        if not last_result.get("ok"):
+            raise SystemExit(
+                f"ERROR: failed to navigate calendar to {date_str}: "
+                f"{last_result.get('reason') or last_result}"
+            )
+
+        if last_result.get("done"):
+            print(
+                f"Navigate month: {last_result.get('nav')} -> {last_result.get('month')}"
+            )
+            return
+
+        cur = last_result.get("month") or {}
+        key = (cur.get("y"), cur.get("mo"))
+        if key == last_key:
+            stuck += 1
+            if stuck >= 3:
+                raise SystemExit(
+                    f"ERROR: failed to navigate calendar to {date_str}: "
+                    "month unchanged after nav clicks "
+                    f"(CRM 可能限制了可选日期范围，当前月 {cur})"
+                )
+        else:
+            stuck = 0
+        last_key = key
+
+        print(
+            f"Navigate step {attempt + 1}: {cur} "
+            f"-> target {date_str[:7]} (dir {last_result.get('dir')})"
+        )
+        await asyncio.sleep(0.25)
+
+    raise SystemExit(
+        f"ERROR: failed to navigate calendar to {date_str}: max nav iterations "
+        f"(last month {last_result.get('month')})"
+    )
+
+
 async def cmd_set_dates(
     cdp_base: str, date_str: str, *, skip_close: bool = False
 ) -> None:
@@ -407,6 +632,16 @@ async def cmd_set_dates(
     if len(parts) != 3:
         raise SystemExit("ERROR: --date must be YYYY-MM-DD")
     year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+    try:
+        target = date(year, month, day)
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: invalid date {date_str}: {exc}") from exc
+    today = date.today()
+    if target > today:
+        raise SystemExit(
+            f"ERROR: {date_str} 是未来日期（今天 {today.isoformat()}），"
+            "CRM 日期选择器通常不可选未来日期，请改为今天或更早。"
+        )
 
     targets = _list_targets(cdp_base)
     page = _pick_page_target(targets, prefer_tmscrm=True)
@@ -451,33 +686,46 @@ async def cmd_set_dates(
         print(f"Click picker: {out}")
         await asyncio.sleep(0.8)
 
-        # Step 2: Click the target date cell in the calendar panel
-        click_day_expr = f"""
-(function(){{
-    var targetDay = {day};
-    var panel = document.querySelector(".el-date-range-picker__content");
-    if (!panel) return 'no panel';
-    var cells = panel.querySelectorAll("td.available");
-    for (var cell of cells) {{
-        var span = cell.querySelector("span");
-        if (!span) continue;
-        var text = span.innerText.trim();
-        if (parseInt(text) === targetDay) {{
-            if (cell.className.includes('prev-month') || cell.className.includes('next-month')) continue;
-            cell.click();
-            return 'clicked day ' + targetDay;
-        }}
-    }}
-    return 'day ' + targetDay + ' not found';
-}})()
-"""
-        out2 = await sess.evaluate(click_day_expr)
-        print(f"Click day: {out2}")
+        # Step 2: Navigate calendar to target month (one step per CDP call), then click day.
+        await _navigate_calendar_to_month(sess, year, month, day, date_str)
+        await asyncio.sleep(0.3)
+
+        click_expr_day = _date_picker_action_expr("click-day", year, month, day)
+
+        async def click_day_once(label: str) -> dict:
+            last: dict[str, Any] = {"ok": False, "click": "no attempt"}
+            for attempt in range(4):
+                raw = await sess.evaluate(click_expr_day)
+                try:
+                    last = json.loads(raw)
+                except json.JSONDecodeError:
+                    last = {"ok": False, "click": raw}
+                print(f"{label} (attempt {attempt + 1}): {last.get('click')}")
+                if last.get("ok"):
+                    return last
+                if attempt < 3:
+                    await asyncio.sleep(0.4)
+            return last
+
+        click1_result = await click_day_once("Click day")
+        if not click1_result.get("ok"):
+            hint = ""
+            click_msg = str(click1_result.get("click") or "")
+            if "disabled" in click_msg:
+                hint = (
+                    f" 该日期在 CRM 中不可选（今天 {today.isoformat()}）。"
+                    "请选择今天或更早的日期。"
+                )
+            raise SystemExit(
+                f"ERROR: first date click failed for {date_str}: {click1_result}{hint}"
+            )
         await asyncio.sleep(0.5)
 
-        # Same-day range selection needs both start and end clicks in Element UI.
-        out3 = await sess.evaluate(click_day_expr)
-        print(f"Click day again: {out3}")
+        click2_result = await click_day_once("Click day again")
+        if not click2_result.get("ok"):
+            raise SystemExit(
+                f"ERROR: second date click failed for {date_str}: {click2_result}"
+            )
         await asyncio.sleep(1.0)
 
         # Verify
@@ -489,8 +737,12 @@ async def cmd_set_dates(
     return JSON.stringify(vals);
 })()
 """
-        after = await sess.evaluate(verify_expr)
-        print(f"After set: {after}")
+        after_vals = json.loads(await sess.evaluate(verify_expr))
+        print(f"After set: {after_vals}")
+        if not _dates_match_inputs(after_vals, date_str):
+            raise SystemExit(
+                f"ERROR: date verify failed after set: got {after_vals}, expected {date_str}"
+            )
 
 
 async def cmd_check_department(cdp_base: str) -> None:

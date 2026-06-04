@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import { NodeCdpWebSocket } from './node-ws-client.js';
+import { formatExportError } from './export-script-lib/format-export-error.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -149,10 +150,23 @@ function usesNodeWsApi(socket) {
 
 function parseMessage(raw) {
   const text = typeof raw === 'string' ? raw : raw.toString();
-  return JSON.parse(text);
+  if (!text.trim()) {
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function handleMessage(message, client) {
+  if (!message || typeof message !== 'object') {
+    return;
+  }
   if (message.id) {
     const pending = client.pending.get(message.id);
     if (!pending) return;
@@ -187,7 +201,11 @@ export class CDPClient {
     if (mode === 'builtin') {
       this.ws = new WebSocketImpl(url);
       this.ws.on('error', () => {}); // 避免未捕获的 error 事件导致 Node 进程崩溃
-      await this.ws.connect();
+      try {
+        await this.ws.connect();
+      } catch (err) {
+        throw new Error(formatExportError(err));
+      }
       this.ws.on('message', (raw) => {
         handleMessage(parseMessage(raw), this);
       });
@@ -206,7 +224,7 @@ export class CDPClient {
         const onError = (err) => {
           ws.off('open', onOpen);
           ws.off('error', onError);
-          reject(err);
+          reject(new Error(formatExportError(err)));
         };
         ws.on('open', onOpen);
         ws.on('error', onError);

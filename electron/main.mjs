@@ -30,10 +30,9 @@ import {
   applyWin7NodePlatformWorkaround,
   verifyBundledRuntime
 } from './src/lib/runtime-paths.js';
-
 applyWin7NodePlatformWorkaround();
 
-const { app, BrowserWindow, ipcMain, dialog } = electron;
+const { app, BrowserWindow, ipcMain, dialog, Menu } = electron;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,6 +43,34 @@ log.transports.console.level = 'info';
 let mainWindow = null;
 let activeOrchestrator = null;
 let exportRunning = false;
+let rendererWatchStarted = false;
+
+const uiDevMode = () => process.env.CHAT_AUDIT_DEV === '1';
+
+/** Windows 11+ 才支持 titleBarOverlay，Win7/10 须保留系统标题栏以免丢失窗口按钮 */
+function isWin11OrLater() {
+  if (process.platform !== 'win32') return false;
+  try {
+    const build = parseInt(String(process.getSystemVersion()).split('.')[2], 10);
+    return Number.isFinite(build) && build >= 22000;
+  } catch {
+    return false;
+  }
+}
+
+function applyAppMenuPolicy(win) {
+  if (uiDevMode()) {
+    setupDevMenu();
+    if (process.platform === 'win32' && win) {
+      win.setAutoHideMenuBar(true);
+      win.setMenuBarVisibility(false);
+    }
+    return;
+  }
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null);
+  }
+}
 
 function userDataDir() {
   return app.getPath('userData');
@@ -78,22 +105,109 @@ function createWindow() {
   // preload 与 main.mjs 同目录，开发态与 app.asar.unpacked 打包后均用 __dirname
   const preloadPath = path.join(__dirname, 'preload.cjs');
 
+  const isMac = process.platform === 'darwin';
+  const isWin = process.platform === 'win32';
+  const winTitleBarOverlay = isWin && isWin11OrLater();
+
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 700,
+    width: 1200,
+    height: 800,
+    minWidth: 960,
+    minHeight: 680,
+    ...(isMac
+      ? {
+          titleBarStyle: 'hiddenInset',
+          trafficLightPosition: { x: 14, y: 16 }
+        }
+      : {}),
+    ...(winTitleBarOverlay
+      ? {
+          titleBarStyle: 'hidden',
+          titleBarOverlay: {
+            color: '#ffffff',
+            symbolColor: '#262626',
+            height: 48
+          }
+        }
+      : {}),
+    ...(isWin ? { autoHideMenuBar: true } : {}),
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      additionalArguments: uiDevMode() ? ['--chat-audit-dev=1'] : []
     },
-    title: '一手聊天审计导出',
+    title: uiDevMode() ? '[DEV] 一手聊天审计导出' : '一手聊天审计导出',
     backgroundColor: '#ffffff'
   });
 
+  applyAppMenuPolicy(mainWindow);
+
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  if (uiDevMode()) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      mainWindow.webContents.openDevTools({ mode: 'detach' });
+    });
+    watchRendererFiles();
+  }
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+}
+
+function setupDevMenu() {
+  const template = [
+    ...(process.platform === 'darwin'
+      ? [
+          {
+            label: '开发',
+            submenu: [
+              { role: 'reload', label: '重新加载界面' },
+              { role: 'forceReload', label: '强制重新加载' },
+              { type: 'separator' },
+              { role: 'toggleDevTools', label: '开发者工具' }
+            ]
+          }
+        ]
+      : []),
+    {
+      label: '视图',
+      submenu: [
+        { role: 'reload', label: '重新加载界面' },
+        { role: 'forceReload', label: '强制重新加载' },
+        { type: 'separator' },
+        { role: 'toggleDevTools', label: '开发者工具' },
+        { type: 'separator' },
+        { role: 'resetZoom', label: '重置缩放' },
+        { role: 'zoomIn', label: '放大' },
+        { role: 'zoomOut', label: '缩小' }
+      ]
+    }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function watchRendererFiles() {
+  if (rendererWatchStarted) return;
+  rendererWatchStarted = true;
+
+  const rendererDir = path.join(__dirname, 'renderer');
+  let reloadTimer = null;
+
+  fs.watch(rendererDir, { recursive: true }, (_event, filename) => {
+    if (!filename || !/\.(html|css|js)$/i.test(filename)) return;
+    clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        log.info('[dev] renderer changed, reloading:', filename);
+        mainWindow.webContents.reload();
+      }
+    }, 180);
+  });
+
+  log.info('[dev] watching renderer/', rendererDir);
 }
 
 async function initChromeInBackground() {
@@ -106,7 +220,7 @@ async function initChromeInBackground() {
     sendToRenderer('chrome-status', {
       ready: started,
       message: started
-        ? '专用 Chrome 已就绪；若见登录页请在此窗口登录（~/.chrome-chat-audit-profile 会保留登录态）'
+        ? '专用 Chrome 已就绪；若见登录页请在此窗口登录'
         : 'Chrome 启动失败，导出时将重试'
     });
   } catch (err) {

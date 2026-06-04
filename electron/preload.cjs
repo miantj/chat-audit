@@ -1,6 +1,23 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+function isWin11OrLater() {
+  if (process.platform !== 'win32') return false;
+  try {
+    const build = parseInt(String(process.getSystemVersion()).split('.')[2], 10);
+    return Number.isFinite(build) && build >= 22000;
+  } catch {
+    return false;
+  }
+}
+
+const isDev =
+  process.env.CHAT_AUDIT_DEV === '1' ||
+  process.argv.includes('--chat-audit-dev=1');
+
 contextBridge.exposeInMainWorld('electronAPI', {
+  isDev,
+  platform: process.platform,
+  winTitleBarOverlay: isWin11OrLater(),
   startExport: (options) => ipcRenderer.invoke('start-export', options),
   pauseExport: () => ipcRenderer.invoke('pause-export'),
   resumeExport: () => ipcRenderer.invoke('resume-export'),

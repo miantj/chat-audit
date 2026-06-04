@@ -1,4 +1,4 @@
-import { DOM_PACE_DEFAULTS } from './dom-pace-config.js';
+import { DOM_PACE_DEFAULTS } from './dom-pace-config.mjs';
 
 /** 温和加速：Electron / CLI 共用；搜索/选中/滚动用 DOM 就绪等待 */
 export const MODERATE_PACED_ENV = {

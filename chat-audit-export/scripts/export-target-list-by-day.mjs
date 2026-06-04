@@ -34,7 +34,9 @@ function parseCliArgs(argv) {
     pacedFlag: '--fast-paced',
     skipDateValidation: true,
     mergeOnly: false,
-    selfHealWrapper: false
+    selfHealWrapper: false,
+    forceAllDays: false,
+    forceDays: []
   };
   for (const arg of argv) {
     if (arg.startsWith('--start=')) opts.start = arg.slice(8);
@@ -49,6 +51,8 @@ function parseCliArgs(argv) {
       opts.targetListStrategy = arg.slice(23);
     }
     else if (arg.startsWith('--expect-dept=')) opts.expectDept = arg.slice(14);
+    else if (arg.startsWith('--force-day=')) opts.forceDays.push(arg.slice(12));
+    else if (arg === '--force-all-days') opts.forceAllDays = true;
     else if (arg === '--paced') opts.pacedFlag = '--paced';
     else if (arg === '--fast-paced') opts.pacedFlag = '--fast-paced';
     else if (arg === '--no-paced') opts.pacedFlag = '--no-paced';
@@ -65,7 +69,10 @@ Options:
   --max=N                    Max conversations per daily export
   --max-rows=N               Max employee rows per daily export
   --target-list-strategy=visible|search
+                             Default: visible
   --expect-dept=NAME         Department gate
+  --force-all-days           Re-export every day even if a prior run completed
+  --force-day=YYYY-MM-DD     Re-export one day (repeatable)
   --paced|--fast-paced|--no-paced
   --self-heal-wrapper        Use export-with-self-heal.mjs
   --merge-only               Only merge existing daily files
@@ -119,16 +126,151 @@ function enumerateDates(start, end) {
   return dates;
 }
 
-function spawnAndWait(cmd, args, env = {}) {
+function dailyExportDonePath(dailyOut) {
+  return dailyOut.replace(/\.json$/i, '.export-done');
+}
+
+function getTargetsFileFingerprint(targetsFile) {
+  if (!targetsFile) {
+    return null;
+  }
+  const resolvedPath = path.resolve(targetsFile);
+  if (!fs.existsSync(resolvedPath)) {
+    return {
+      path: resolvedPath,
+      exists: false
+    };
+  }
+  const stat = fs.statSync(resolvedPath);
+  return {
+    path: fs.realpathSync(resolvedPath),
+    basename: path.basename(resolvedPath),
+    size: stat.size,
+    mtimeMs: Math.trunc(stat.mtimeMs)
+  };
+}
+
+function buildDailyExportFingerprint(opts, day) {
+  return {
+    version: 1,
+    day,
+    targetsFile: getTargetsFileFingerprint(opts.targetsFile),
+    targetsSheet: opts.targetsSheet || '',
+    targetListStrategy: opts.targetListStrategy || 'visible',
+    max: opts.max || '',
+    maxRows: opts.maxRows || '',
+    pacedFlag: opts.pacedFlag || '',
+    skipDateValidation: Boolean(opts.skipDateValidation),
+    expectDept: opts.expectDept || '',
+    selfHealWrapper: Boolean(opts.selfHealWrapper)
+  };
+}
+
+function readDailyExportDoneMarker(marker) {
+  try {
+    return JSON.parse(fs.readFileSync(marker, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function dailyExportMarkerMatches(marker, day, opts) {
+  const markerData = readDailyExportDoneMarker(marker);
+  if (!markerData?.fingerprint) {
+    return false;
+  }
+  const expected = buildDailyExportFingerprint(opts, day);
+  return JSON.stringify(markerData.fingerprint) === JSON.stringify(expected);
+}
+
+function shouldSkipDailyExport(dailyOut, day, opts) {
+  if (opts.forceAllDays) {
+    return null;
+  }
+  if (opts.forceDays.includes(day)) {
+    return null;
+  }
+  const marker = dailyExportDonePath(dailyOut);
+  if (
+    fs.existsSync(marker) &&
+    fs.existsSync(dailyOut) &&
+    fs.statSync(dailyOut).size > 0 &&
+    dailyExportMarkerMatches(marker, day, opts)
+  ) {
+    return 'already complete';
+  }
+  return null;
+}
+
+function hasStaleDailyExportMarker(dailyOut, day, opts) {
+  const marker = dailyExportDonePath(dailyOut);
+  return (
+    fs.existsSync(marker) &&
+    fs.existsSync(dailyOut) &&
+    fs.statSync(dailyOut).size > 0 &&
+    !dailyExportMarkerMatches(marker, day, opts)
+  );
+}
+
+function removeDailyExportDoneMarker(dailyOut) {
+  const marker = dailyExportDonePath(dailyOut);
+  if (fs.existsSync(marker)) {
+    fs.unlinkSync(marker);
+  }
+}
+
+function writeDailyExportDoneMarker(dailyOut, day, opts) {
+  const marker = dailyExportDonePath(dailyOut);
+  const markerData = {
+    completedAt: new Date().toISOString(),
+    fingerprint: buildDailyExportFingerprint(opts, day)
+  };
+  fs.writeFileSync(marker, JSON.stringify(markerData, null, 2), 'utf8');
+}
+
+function parseDailyExportComplete(stdout) {
+  const lines = stdout.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim();
+    if (!trimmed.startsWith('{')) {
+      continue;
+    }
+    try {
+      const ev = JSON.parse(trimmed);
+      if (ev.event === 'export-complete' || ev.event === 'export-shutdown') {
+        const shutdown = ev.event === 'export-shutdown' || Boolean(ev.shutdown);
+        return {
+          complete: ev.event === 'export-complete' && !shutdown,
+          failed: Number(ev.failed) || 0,
+          shutdown
+        };
+      }
+    } catch {
+      /* ignore malformed JSON lines */
+    }
+  }
+  return { complete: false, failed: 0, shutdown: false };
+}
+
+function spawnAndWaitCollect(cmd, args, env = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args, {
       cwd: SCRIPT_ROOT,
       env: { ...process.env, ...env },
-      stdio: 'inherit'
+      stdio: ['ignore', 'pipe', 'pipe']
     });
+    let stdout = '';
+    const forward = (chunk, isErr) => {
+      const text = chunk.toString('utf8');
+      stdout += text;
+      if (isErr) process.stderr.write(text);
+      else process.stdout.write(text);
+    };
+    proc.stdout.on('data', (chunk) => forward(chunk, false));
+    proc.stderr.on('data', (chunk) => forward(chunk, true));
     proc.on('error', reject);
     proc.on('close', (code) => {
-      if (code === 0) resolve();
+      if (code === 0) resolve(stdout);
       else reject(new Error(`${cmd} exited with code ${code}`));
     });
   });
@@ -167,17 +309,19 @@ async function runDailyExport(opts, day, dailyOut) {
   else if (opts.pacedFlag === '--no-paced') exportArgs.push('--no-paced');
   else exportArgs.push('--fast-paced');
 
+  let stdout;
   if (opts.selfHealWrapper) {
-    await spawnAndWait(NODE_BIN, [
+    stdout = await spawnAndWaitCollect(NODE_BIN, [
       path.join(SCRIPT_DIR, 'export-with-self-heal.mjs'),
       ...exportArgs
     ]);
   } else {
-    await spawnAndWait(NODE_BIN, [
+    stdout = await spawnAndWaitCollect(NODE_BIN, [
       path.join(SCRIPT_DIR, 'export-date-range.js'),
       ...exportArgs
     ]);
   }
+  return parseDailyExportComplete(stdout);
 }
 
 async function main() {
@@ -206,25 +350,76 @@ async function main() {
   fs.mkdirSync(outDir, { recursive: true });
 
   const dates = enumerateDates(opts.start, opts.end);
+  let skippedDays = 0;
 
   if (!opts.mergeOnly) {
-    for (const day of dates) {
+    for (let dayIndex = 0; dayIndex < dates.length; dayIndex++) {
+      const day = dates[dayIndex];
       const dailyOut = path.join(outDir, `${opts.basename}-${day}.json`);
+      const skipReason = shouldSkipDailyExport(dailyOut, day, opts);
+      const staleMarker = !skipReason && hasStaleDailyExportMarker(dailyOut, day, opts);
+
       console.log('');
+      console.log(
+        JSON.stringify({
+          event: 'export-progress',
+          current: dayIndex + 1,
+          total: dates.length,
+          unit: 'day',
+          reset: dayIndex > 0,
+          phase: skipReason ? 'resume' : null,
+          message: skipReason
+            ? `续传跳过 ${dayIndex + 1}/${dates.length}：${day}（已完成）`
+            : `按天导出 ${dayIndex + 1}/${dates.length}：${day}`
+        })
+      );
+
+      if (skipReason) {
+        console.log(`========== Skip daily target-list export: ${day} (${skipReason}) ==========`);
+        console.log(`Output: ${dailyOut}`);
+        skippedDays += 1;
+        continue;
+      }
+
       console.log(`========== Daily target-list export: ${day} ==========`);
       console.log(`Output: ${dailyOut}`);
-      await runDailyExport(opts, day, dailyOut);
+      if (staleMarker) {
+        console.warn(
+          `Warning: completion marker for ${day} does not match current targets/options; re-exporting this day.`
+        );
+      }
+      // 开始导出前清除旧标记，避免 force 重导中断后仍被续传跳过
+      removeDailyExportDoneMarker(dailyOut);
+      const summary = await runDailyExport(opts, day, dailyOut);
+      if (summary.complete && summary.failed === 0) {
+        writeDailyExportDoneMarker(dailyOut, day, opts);
+      } else if (summary.complete && summary.failed > 0) {
+        removeDailyExportDoneMarker(dailyOut);
+        console.warn(
+          `Warning: daily export for ${day} finished with ${summary.failed} failed conversation(s); will retry on next run.`
+        );
+      } else {
+        removeDailyExportDoneMarker(dailyOut);
+        console.warn(
+          `Warning: daily export for ${day} ended before completion (shutdown/interrupted); will resume on next run.`
+        );
+      }
     }
   }
 
   const mergeInputs = [];
   for (const day of dates) {
     const dailyJson = path.join(outDir, `${opts.basename}-${day}.json`);
-    if (fs.existsSync(dailyJson)) {
-      mergeInputs.push(`--in=${dailyJson}`);
-    } else {
+    if (!fs.existsSync(dailyJson)) {
       console.warn(`Warning: missing daily export, not merging: ${dailyJson}`);
+      continue;
     }
+    const size = fs.statSync(dailyJson).size;
+    if (size === 0) {
+      console.warn(`Warning: empty daily export (0 bytes), not merging: ${dailyJson}`);
+      continue;
+    }
+    mergeInputs.push(`--in=${dailyJson}`);
   }
 
   if (mergeInputs.length === 0) {
@@ -234,7 +429,7 @@ async function main() {
 
   const mergedOut = path.join(outDir, `${opts.basename}-merged.json`);
   const mergedJsonl = path.join(outDir, `${opts.basename}-merged.jsonl`);
-  await spawnAndWait(NODE_BIN, [
+  await spawnAndWaitCollect(NODE_BIN, [
     path.join(SCRIPT_DIR, 'merge-daily-exports.js'),
     ...mergeInputs,
     `--out=${mergedOut}`,
@@ -243,6 +438,9 @@ async function main() {
 
   console.log('');
   console.log('✅ Daily target-list export complete');
+  if (skippedDays > 0) {
+    console.log(`Skipped ${skippedDays} already-complete day(s); merged ${mergeInputs.length} daily file(s).`);
+  }
   console.log(`Merged JSON:  ${mergedOut}`);
   console.log(`Merged JSONL: ${mergedJsonl}`);
 }
