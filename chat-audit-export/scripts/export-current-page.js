@@ -1725,7 +1725,7 @@ async function searchExternalFriendByCustomerId(
   pageClient,
   customerId,
   customerInfo = '',
-  { pollIntervalMs = 500, resultTimeoutMs = 10000 } = {}
+  { pollIntervalMs = 500, resultTimeoutMs = 5000 } = {}
 ) {
   const searchTerms = extractCustomerSearchTerms(customerInfo, customerId);
   if (searchTerms.length === 0) {
