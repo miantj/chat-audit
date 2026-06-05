@@ -12,7 +12,8 @@ import { loadTargetList } from './lib/target-list.js';
 import {
   applyFailedRetryPassEnv,
   FAILED_RETRY_MAX,
-  retryPassStrategy
+  retryPassStrategy,
+  shouldScheduleFailedRetry
 } from './lib/failed-retry-meta.mjs';
 import { isCdpUp } from './lib/cdp-bootstrap.mjs';
 import { formatExportError } from './lib/export-script-lib/format-export-error.mjs';
@@ -215,7 +216,7 @@ const expectedCategory = (opts.category || '').trim();
 const expectedActiveTab = (opts.tab || '').trim();
 const skipDateValidation = opts['skip-date-validation'] === true;
 const dryRunTargets = opts['dry-run-targets'] === true;
-const targetListStrategy = String(opts['target-list-strategy'] || opts['targets-strategy'] || 'search').trim();
+const targetListStrategy = String(opts['target-list-strategy'] || opts['targets-strategy'] || 'visible').trim();
 if (targetListStrategy && !['search', 'visible'].includes(targetListStrategy)) {
   console.error('Error: --target-list-strategy must be search or visible.');
   process.exit(1);
@@ -225,6 +226,52 @@ if (opts['fast-paced'] === true && opts['no-paced'] === true) {
   process.exit(1);
 }
 const retryFailed = opts['retry-failed'] === true;
+if (retryFailed && !shouldScheduleFailedRetry({ targetsFile, targetListStrategy })) {
+  process.stdout.write(
+    JSON.stringify({
+      event: 'export-progress',
+      message: '[retry-failed] 目标名单 search 策略不支持失败列表补跑，已跳过'
+    }) + '\n'
+  );
+  if (fs.existsSync(outputPath)) {
+    try {
+      const existingDataset = readJsonFileSync(outputPath, null);
+      console.log(
+        JSON.stringify({
+          event: 'export-complete',
+          conversations: existingDataset?.conversations?.length ?? 0,
+          completed: existingDataset?.progress?.completed_conversation_ids?.length ?? 0,
+          failed: existingDataset?.progress?.failed_conversation_ids?.length ?? 0,
+          outputPath,
+          retrySkipped: true
+        })
+      );
+    } catch {
+      console.log(
+        JSON.stringify({
+          event: 'export-complete',
+          conversations: 0,
+          completed: 0,
+          failed: 0,
+          outputPath,
+          retrySkipped: true
+        })
+      );
+    }
+  } else {
+    console.log(
+      JSON.stringify({
+        event: 'export-complete',
+        conversations: 0,
+        completed: 0,
+        failed: 0,
+        outputPath,
+        retrySkipped: true
+      })
+    );
+  }
+  process.exit(0);
+}
 if (retryFailed) {
   process.env.CHAT_AUDIT_RETRY_FAILED = '1';
   if (!process.env.CHAT_AUDIT_RETRY_PASS) {

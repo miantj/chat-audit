@@ -20,7 +20,8 @@ import { resolveExportOutputPath } from './lib/export-path.js';
 import { countFailedConversations } from './lib/export-json-stats.mjs';
 import {
   FAILED_RETRY_MAX,
-  readFailedRetryPassesUsed
+  readFailedRetryPassesUsed,
+  shouldScheduleFailedRetry
 } from './lib/failed-retry-meta.mjs';
 import { MODERATE_PACED_ENV } from './lib/moderate-paced-env.mjs';
 import { runPreflight } from './lib/run-preflight.mjs';
@@ -100,6 +101,10 @@ function printHelp() {
   --department=名称        部门（默认：${DEFAULT_DEPT}）
   --output-dir=路径        输出目录（默认：cwd/exports；在 skill 目录内运行时为 ../exports）
   --out=路径.json          指定输出 JSON 文件（优先于 --output-dir）
+  --targets-file=路径      目标名单 Excel/CSV（启用目标名单模式）
+  --targets-sheet=名称     Excel 工作表名（默认首 sheet）
+  --target-list-strategy=visible|search
+                           目标名单策略（默认 visible）
   --full-export            全量导出（清除指标 checkpoint，不续传失败列表）
   --help, -h               显示帮助
 
@@ -110,6 +115,7 @@ function printHelp() {
 示例:
   cd chat-audit-export && node scripts/start-export.mjs
   node scripts/start-export.mjs --start=2026-05-21 --output-dir=../exports
+  node scripts/start-export.mjs --targets-file=./list.xlsx --start=2026-05-30 --end=2026-06-02
 
 前提: 专用 Chrome（~/.chrome-chat-audit-profile）已用 CDP 9222 登录 CRM。
 `);
@@ -122,6 +128,9 @@ function parseArgs(argv) {
     department: DEFAULT_DEPT,
     outputDir: '',
     out: '',
+    targetsFile: '',
+    targetsSheet: '',
+    targetListStrategy: 'visible',
     fullExport: false,
     help: false
   };
@@ -133,6 +142,11 @@ function parseArgs(argv) {
     else if (arg.startsWith('--dept=')) opts.department = arg.slice(7);
     else if (arg.startsWith('--output-dir=')) opts.outputDir = arg.slice(13);
     else if (arg.startsWith('--out=')) opts.out = arg.slice(6);
+    else if (arg.startsWith('--targets-file=')) opts.targetsFile = arg.slice(15);
+    else if (arg.startsWith('--targets-sheet=')) opts.targetsSheet = arg.slice(16);
+    else if (arg.startsWith('--target-list-strategy=')) {
+      opts.targetListStrategy = arg.slice(23);
+    }
     else if (arg === '--full-export') opts.fullExport = true;
     else {
       console.error(`未知参数: ${arg}`);
@@ -177,16 +191,37 @@ async function main() {
   const outputDir = path.resolve(
     cli.outputDir || resolveDefaultOutputDir(cwd)
   );
+  const isTargetList = Boolean(cli.targetsFile);
+  const isMultiDayTargetList = isTargetList && start !== end;
+  const customerSelectionMode = isTargetList ? 'target-list' : 'effective';
   const outputPath = cli.out
-    ? resolveExportOutputPath(cli.out, { cwd, dateStart: start })
-    : path.join(outputDir, `chat-audit-${start}.json`);
+    ? resolveExportOutputPath(cli.out, { cwd, dateStart: start, customerSelectionMode })
+    : isMultiDayTargetList
+      ? path.join(
+          outputDir,
+          `target-list-by-day-${start}_${end}`,
+          'chat-audit-target-list-merged.json'
+        )
+      : resolveExportOutputPath(null, {
+          cwd: outputDir,
+          dateStart: start,
+          customerSelectionMode
+        });
 
   assertOutputNotInSkill(outputPath);
+
+  if (isTargetList && !path.isAbsolute(cli.targetsFile)) {
+    cli.targetsFile = path.resolve(cwd, cli.targetsFile);
+  }
+  if (isTargetList && !fs.existsSync(cli.targetsFile)) {
+    console.error(`错误: 目标名单文件不存在: ${cli.targetsFile}`);
+    process.exit(1);
+  }
 
   clearExportSignals();
 
   console.log(
-    `[start-export] 日期 ${start}${start === end ? '' : ` ~ ${end}`}，部门 ${cli.department}`
+    `[start-export] 日期 ${start}${start === end ? '' : ` ~ ${end}`}，部门 ${cli.department}${isTargetList ? '，模式=目标名单' : ''}`
   );
   console.log(`[start-export] 输出 ${outputPath}`);
 
@@ -203,51 +238,22 @@ async function main() {
     process.exit(1);
   }
 
-  console.log('[start-export] 准备 CRM 页面（prepare-export）…');
-  try {
-    await runPreflight(
-      ['prepare-export', '--expect-dept', cli.department, '--expect-date', start],
-      { cdpBase, onProgress: logProgress }
-    );
-  } catch (err) {
-    console.error(err.message || err);
-    process.exit(1);
+  if (!isMultiDayTargetList) {
+    console.log('[start-export] 准备 CRM 页面（prepare-export）…');
+    try {
+      await runPreflight(
+        ['prepare-export', '--expect-dept', cli.department, '--expect-date', start],
+        { cdpBase, onProgress: logProgress }
+      );
+    } catch (err) {
+      console.error(err.message || err);
+      process.exit(1);
+    }
+  } else {
+    console.log('[start-export] 跨日目标名单：将按天设置 CRM 日期并逐日导出…');
   }
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-
-  const runner = path.join(SCRIPTS_DIR, 'export-with-self-heal.mjs');
-  const runnerArgs = [
-    runner,
-    `--start=${start}`,
-    `--end=${end}`,
-    `--out=${outputPath}`,
-    '--keywords=',
-    '--skip-date-validation'
-  ];
-
-  const failedCount = countFailedConversations(outputPath, NODE_BIN);
-  const retryPassesUsed = readFailedRetryPassesUsed(outputPath);
-  const retryBudgetLeft =
-    FAILED_RETRY_MAX - Math.min(retryPassesUsed, FAILED_RETRY_MAX);
-  const resumeFailedOnly =
-    failedCount > 0 && !cli.fullExport && retryBudgetLeft > 0;
-
-  if (failedCount > 0 && !cli.fullExport && retryBudgetLeft <= 0) {
-    console.log(
-      `[start-export] 仍有 ${failedCount} 条失败会话，已补跑 ${FAILED_RETRY_MAX} 次，本次全量导出`
-    );
-  }
-  if (resumeFailedOnly) {
-    runnerArgs.push('--retry-failed');
-    console.log(
-      `[start-export] 续传失败会话 ${failedCount} 条（剩余补跑 ${retryBudgetLeft}/${FAILED_RETRY_MAX}）`
-    );
-  }
-
-  const clearMetricCheckpoint =
-    cli.fullExport ||
-    (failedCount > 0 && !cli.fullExport && retryBudgetLeft <= 0 && !resumeFailedOnly);
 
   const exportEnv = {
     ...process.env,
@@ -259,13 +265,85 @@ async function main() {
     CHAT_AUDIT_START_GATE_DONE: '1',
     CHAT_AUDIT_CALLER_CWD: path.dirname(outputPath),
     CHAT_AUDIT_EXPORT_DIR: path.dirname(outputPath),
-    OUTPUT_PATH: outputPath,
-    ...(clearMetricCheckpoint
-      ? { CHAT_AUDIT_CLEAR_METRIC_CHECKPOINT: '1' }
-      : {})
+    OUTPUT_PATH: outputPath
   };
 
-  console.log('[start-export] 开始导出（export-with-self-heal）…\n');
+  let runner;
+  let runnerArgs;
+
+  if (isMultiDayTargetList) {
+    runner = path.join(SCRIPTS_DIR, 'export-target-list-by-day.mjs');
+    runnerArgs = [
+      runner,
+      `--start=${start}`,
+      `--end=${end}`,
+      `--targets-file=${cli.targetsFile}`,
+      `--out-dir=${path.dirname(outputPath)}`,
+      '--basename=chat-audit-target-list',
+      `--target-list-strategy=${cli.targetListStrategy}`,
+      `--expect-dept=${cli.department}`,
+      '--self-heal-wrapper',
+      '--fast-paced'
+    ];
+    if (cli.targetsSheet) {
+      runnerArgs.push(`--targets-sheet=${cli.targetsSheet}`);
+    }
+    console.log('[start-export] 开始按天导出（export-target-list-by-day）…\n');
+  } else {
+    runner = path.join(SCRIPTS_DIR, 'export-with-self-heal.mjs');
+    runnerArgs = [
+      runner,
+      `--start=${start}`,
+      `--end=${end}`,
+      `--out=${outputPath}`,
+      '--keywords=',
+      '--skip-date-validation',
+      '--fast-paced'
+    ];
+    if (isTargetList) {
+      runnerArgs.push(`--targets-file=${cli.targetsFile}`);
+      runnerArgs.push(`--target-list-strategy=${cli.targetListStrategy}`);
+      if (cli.targetsSheet) {
+        runnerArgs.push(`--targets-sheet=${cli.targetsSheet}`);
+      }
+    }
+
+    const failedCount = countFailedConversations(outputPath, NODE_BIN);
+    const retryPassesUsed = readFailedRetryPassesUsed(outputPath);
+    const retryBudgetLeft =
+      FAILED_RETRY_MAX - Math.min(retryPassesUsed, FAILED_RETRY_MAX);
+    const canScheduleFailedRetry = shouldScheduleFailedRetry({
+      targetsFile: isTargetList ? cli.targetsFile : '',
+      targetListStrategy: cli.targetListStrategy || 'visible'
+    });
+    const resumeFailedOnly =
+      canScheduleFailedRetry &&
+      failedCount > 0 &&
+      !cli.fullExport &&
+      retryBudgetLeft > 0;
+
+    if (failedCount > 0 && !cli.fullExport && retryBudgetLeft <= 0 && canScheduleFailedRetry) {
+      console.log(
+        `[start-export] 仍有 ${failedCount} 条失败会话，已补跑 ${FAILED_RETRY_MAX} 次，本次全量导出`
+      );
+    }
+    if (resumeFailedOnly) {
+      runnerArgs.push('--retry-failed');
+      console.log(
+        `[start-export] 续传失败会话 ${failedCount} 条（剩余补跑 ${retryBudgetLeft}/${FAILED_RETRY_MAX}）`
+      );
+    }
+
+    const clearMetricCheckpoint =
+      cli.fullExport ||
+      (failedCount > 0 && !cli.fullExport && retryBudgetLeft <= 0 && !resumeFailedOnly);
+
+    if (clearMetricCheckpoint) {
+      exportEnv.CHAT_AUDIT_CLEAR_METRIC_CHECKPOINT = '1';
+    }
+
+    console.log('[start-export] 开始导出（export-with-self-heal）…\n');
+  }
 
   const code = await new Promise((resolve) => {
     const proc = spawn(NODE_BIN, runnerArgs, {

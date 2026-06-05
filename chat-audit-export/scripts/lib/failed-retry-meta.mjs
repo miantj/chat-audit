@@ -53,6 +53,22 @@ export function buildRetryRunEnv(retryPass) {
   };
 }
 
+/** 目标名单 search 策略：逐个 ID 搜索，不做 failed-list 自动补跑 */
+export function isTargetListSearchExport(options = {}) {
+  const strategy = String(
+    options.targetListStrategy ?? options['target-list-strategy'] ?? ''
+  )
+    .trim()
+    .toLowerCase();
+  const targetsFile =
+    options.targetsFile ?? options['targets-file'] ?? options.targets_file ?? '';
+  return Boolean(targetsFile) && strategy === 'search';
+}
+
+export function shouldScheduleFailedRetry(options = {}) {
+  return !isTargetListSearchExport(options);
+}
+
 export function applyFailedRetryPassEnv(outputPath) {
   const retryPass = nextFailedRetryPass(outputPath);
   const env = buildRetryRunEnv(retryPass);

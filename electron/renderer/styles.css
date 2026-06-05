@@ -614,6 +614,19 @@ button.field-hint-trigger:hover {
   border-color: var(--color-primary);
 }
 
+.btn-danger {
+  background: #fff;
+  color: #ff7875;
+  border-color: #ffa39e;
+  padding: 8px 16px;
+}
+
+.btn-danger:hover:not(:disabled) {
+  color: #fff;
+  background: #ff7875;
+  border-color: #ff7875;
+}
+
 .btn-block {
   width: 100%;
   height: 42px;

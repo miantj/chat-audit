@@ -443,7 +443,7 @@ function formatProgressCaption(current, total, unit = progressUnit, options = {}
     return `续传 ${current}/${total}`;
   }
   if (unit === 'day') {
-    return `第 ${current}/${total} 天`;
+    return `已完成 ${current}/${total} 天`;
   }
   if (options.resume) {
     return `续传 ${current}/${total}`;
@@ -764,6 +764,10 @@ function updateProgress(data) {
   if (data.reset || retryPhase) {
     lastPercentShown = 0;
   }
+  // 跨日按天导出时，单日内的员工/会话进度不应覆盖天级进度条
+  if (progressUnit === 'day' && data.unit && data.unit !== 'day') {
+    return;
+  }
   if (data.unit === 'conversation' || data.unit === 'employee' || data.unit === 'day') {
     progressUnit = data.unit;
   }
@@ -1072,11 +1076,10 @@ onExportComplete((data) => {
   if (data.failed > 0) {
     addLog(`仍有 ${data.failed} 条会话失败（已自动补跑最多 2 次）`, 'error');
   }
-  if (data.outputPath) {
-    addLog(`JSON: ${data.outputPath}`, 'success');
-  }
   if (data.csvPath) {
     addLog(`CSV: ${data.csvPath}`, 'success');
+  } else if (data.outputPath) {
+    addLog(`输出: ${data.outputPath}`, 'success');
   }
   if (data.outDir) {
     addLog(`按天导出目录: ${data.outDir}`, 'info');

@@ -90,6 +90,12 @@ export class Orchestrator {
     const failedCount = isMultiDayTargetList
       ? 0
       : countFailedConversations(outputPath);
+    const targetListStrategy = this.options.targetListStrategy || 'visible';
+    const willRetryFailed =
+      isTargetList &&
+      targetListStrategy !== 'search' &&
+      failedCount > 0 &&
+      this.options.fullExport !== true;
 
     const modeLabel = isTargetList
       ? '目标名单'
@@ -101,7 +107,7 @@ export class Orchestrator {
       current: 0,
       total: 0,
       message:
-        failedCount > 0 && this.options.fullExport !== true
+        willRetryFailed
           ? `正在续传失败会话（${failedCount} 条）…`
           : isMultiDayTargetList
             ? `正在按天导出目标名单（${modeLabel}）…`

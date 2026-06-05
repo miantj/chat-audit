@@ -14,7 +14,8 @@ const FILES = [
   'export-json-stats.mjs',
   'failed-retry-meta.mjs',
   'moderate-paced-env.mjs',
-  'dom-pace-config.mjs'
+  'dom-pace-config.mjs',
+  'cleanup-export-artifacts.mjs'
 ];
 
 if (!fs.existsSync(srcLib)) {

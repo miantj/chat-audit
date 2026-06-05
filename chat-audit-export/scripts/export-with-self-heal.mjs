@@ -13,9 +13,9 @@ import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { resolveExportOutputPath } from './lib/export-path.js';
 import {
-  countFailedConversations,
-  LARGE_JSON_BYTES
+  countFailedConversations
 } from './lib/export-json-stats.mjs';
+import { generateBusinessCsv } from './lib/generate-business-csv.mjs';
 import { ensureCdpReady, isCdpUp } from './lib/cdp-bootstrap.mjs';
 import { logCdpWebSocketBootstrap } from './lib/cdp.js';
 import {
@@ -24,6 +24,7 @@ import {
   failedRetryMetaPath,
   readFailedRetryPassesUsed,
   retryPassStrategy,
+  shouldScheduleFailedRetry,
   writeFailedRetryPassesUsed
 } from './lib/failed-retry-meta.mjs';
 
@@ -51,6 +52,13 @@ function log(line) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function failedRetryOptions(cli) {
+  return {
+    targetsFile: cli.targetsFile,
+    targetListStrategy: cli.targetListStrategy || 'visible'
+  };
 }
 
 function parseCliArgs(argv) {
@@ -417,47 +425,6 @@ function runExportDateRange(opts, exportOut, env) {
   });
 }
 
-function generateBusinessCsv(exportOut) {
-  const csvOut = exportOut.replace(/\.json$/i, '.business.csv');
-  const jsonlPath = exportOut.replace(/\.json$/i, '.jsonl');
-  let input = exportOut;
-  if (!fs.existsSync(input) && !fs.existsSync(jsonlPath)) {
-    log(`[warn] Skip CSV: no JSON/JSONL at ${exportOut}`);
-    return null;
-  }
-  if (!fs.existsSync(input)) {
-    input = jsonlPath;
-  } else if (fs.existsSync(jsonlPath)) {
-    const jsonBytes = fs.statSync(input).size;
-    if (jsonBytes > LARGE_JSON_BYTES) {
-      log(`[csv] Large JSON (~${Math.round(jsonBytes / 1048576)}MB), using JSONL`);
-      input = jsonlPath;
-    }
-  }
-  log('Generating business CSV...');
-  try {
-    execFileSync(
-      NODE_BIN,
-      [
-        path.join(SCRIPT_DIR, 'json-to-csv-business.js'),
-        `--in=${input}`,
-        `--out=${csvOut}`
-      ],
-      { cwd: SCRIPT_ROOT, stdio: 'inherit' }
-    );
-    if (fs.existsSync(csvOut)) {
-      log(`[OK] CSV written: ${csvOut}`);
-      console.log(
-        JSON.stringify({ event: 'export-csv-complete', csvPath: csvOut })
-      );
-      return csvOut;
-    }
-  } catch (e) {
-    log(`[warn] CSV generation failed: ${e.message}`);
-  }
-  return null;
-}
-
 function markDone(exportOut) {
   clearState();
   fs.writeFileSync(
@@ -506,8 +473,13 @@ async function main() {
 
   const expectDept = process.env.CHAT_AUDIT_EXPECT_DEPT || '大客私域顾问-总';
   const failedRetryMeta = failedRetryMetaPath(exportOut);
-  let retryFailed = cli.retryFailed;
+  const scheduleFailedRetry = shouldScheduleFailedRetry(failedRetryOptions(cli));
+  let retryFailed = cli.retryFailed && scheduleFailedRetry;
   let exportFast = cli.fast;
+
+  if (cli.retryFailed && !scheduleFailedRetry) {
+    log('[info] 目标名单 search 策略不启用失败列表补跑，已忽略 --retry-failed');
+  }
 
   if (!retryFailed) {
     try {
@@ -518,12 +490,17 @@ async function main() {
   }
   let failedRetryCount = readFailedRetryPassesUsed(exportOut);
 
-  if (cli.retryFailed && failedRetryCount >= FAILED_RETRY_MAX) {
+  if (cli.retryFailed && scheduleFailedRetry && failedRetryCount >= FAILED_RETRY_MAX) {
     log(
       `[warn] Failed-list retry budget already used (${failedRetryCount}/${FAILED_RETRY_MAX}); finalizing without another export pass.`
     );
     if (fs.existsSync(exportOut)) {
-      generateBusinessCsv(exportOut);
+      const failedCount = countFailedConversations(exportOut);
+      generateBusinessCsv(exportOut, {
+        log,
+        nodeBin: NODE_BIN,
+        cleanup: failedCount <= 0
+      });
       markDone(exportOut);
     }
     process.exit(0);
@@ -623,7 +600,7 @@ async function main() {
           failedRetryCount += 1;
           writeFailedRetryPassesUsed(exportOut, failedRetryCount);
         }
-        if (failedRetryCount < FAILED_RETRY_MAX) {
+        if (scheduleFailedRetry && failedRetryCount < FAILED_RETRY_MAX) {
           const nextPass = failedRetryCount + 1;
           log(
             `[warn] ${failedCount} conversation(s) failed; scheduling failed-list retry ${nextPass}/${FAILED_RETRY_MAX}...`
@@ -632,9 +609,15 @@ async function main() {
           exportFast = true;
           continue;
         }
-        log(
-          `[warn] ${failedCount} conversation(s) still failed after ${FAILED_RETRY_MAX} failed-list retry pass(es); continuing with CSV and completion.`
-        );
+        if (scheduleFailedRetry) {
+          log(
+            `[warn] ${failedCount} conversation(s) still failed after ${FAILED_RETRY_MAX} failed-list retry pass(es); continuing with CSV and completion.`
+          );
+        } else {
+          log(
+            `[warn] ${failedCount} conversation(s) failed; target-list search skips auto retry, continuing with CSV and completion.`
+          );
+        }
       }
 
       log('');
@@ -649,7 +632,11 @@ async function main() {
         }
       }
       if (conversations > 0 || failedCount > 0) {
-        generateBusinessCsv(exportOut);
+        generateBusinessCsv(exportOut, {
+          log,
+          nodeBin: NODE_BIN,
+          cleanup: failedCount <= 0
+        });
       } else {
         log('[warn] Skip CSV: no conversations exported this run');
       }

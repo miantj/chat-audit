@@ -11,6 +11,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { generateBusinessCsv } from './lib/generate-business-csv.mjs';
+import { countFailedConversations } from './lib/export-json-stats.mjs';
+import {
+  cleanupTargetListByDayArtifacts,
+  shouldDeferArtifactCleanup
+} from './lib/cleanup-export-artifacts.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_DIR = __dirname;
 const SCRIPT_ROOT = path.dirname(SCRIPT_DIR);
@@ -183,14 +190,36 @@ function dailyExportMarkerMatches(marker, day, opts) {
   return JSON.stringify(markerData.fingerprint) === JSON.stringify(expected);
 }
 
-function isDailyExportComplete(dailyOut, day, opts) {
+function readDailyExportDoneMarkerData(dailyOut) {
   const marker = dailyExportDonePath(dailyOut);
-  return (
-    fs.existsSync(marker) &&
-    fs.existsSync(dailyOut) &&
-    fs.statSync(dailyOut).size > 0 &&
-    dailyExportMarkerMatches(marker, day, opts)
-  );
+  if (!fs.existsSync(marker)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(marker, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function isSearchTargetListStrategy(opts) {
+  return String(opts.targetListStrategy || 'visible').trim().toLowerCase() === 'search';
+}
+
+function dailyBusinessCsvPath(dailyOut) {
+  return dailyOut.replace(/\.json$/i, '.business.csv');
+}
+
+function isDailyExportComplete(dailyOut, day, opts) {
+  const csvPath = dailyBusinessCsvPath(dailyOut);
+  if (fs.existsSync(csvPath) && fs.statSync(csvPath).size > 0) {
+    return true;
+  }
+  const marker = dailyExportDonePath(dailyOut);
+  if (!fs.existsSync(marker) || !dailyExportMarkerMatches(marker, day, opts)) {
+    return false;
+  }
+  return fs.existsSync(dailyOut) && fs.statSync(dailyOut).size > 0;
 }
 
 function shouldSkipDailyExport(dailyOut, day, opts) {
@@ -200,10 +229,20 @@ function shouldSkipDailyExport(dailyOut, day, opts) {
   if (opts.forceDays.includes(day)) {
     return null;
   }
-  if (isDailyExportComplete(dailyOut, day, opts)) {
-    return 'already complete';
+  if (!isDailyExportComplete(dailyOut, day, opts)) {
+    return null;
   }
-  return null;
+  const markerData = readDailyExportDoneMarkerData(dailyOut);
+  const failedCount = Number(markerData?.failedCount) || 0;
+  // 导出过程中：search 有失败会话时不跳过（cleanup 前 marker 仍在）
+  if (
+    markerData &&
+    isSearchTargetListStrategy(opts) &&
+    failedCount > 0
+  ) {
+    return null;
+  }
+  return 'already complete';
 }
 
 function hasStaleDailyExportMarker(dailyOut, day, opts) {
@@ -223,11 +262,12 @@ function removeDailyExportDoneMarker(dailyOut) {
   }
 }
 
-function writeDailyExportDoneMarker(dailyOut, day, opts) {
+function writeDailyExportDoneMarker(dailyOut, day, opts, { failedCount = 0 } = {}) {
   const marker = dailyExportDonePath(dailyOut);
   const markerData = {
     completedAt: new Date().toISOString(),
-    fingerprint: buildDailyExportFingerprint(opts, day)
+    fingerprint: buildDailyExportFingerprint(opts, day),
+    failedCount: Math.max(0, Number(failedCount) || 0)
   };
   fs.writeFileSync(marker, JSON.stringify(markerData, null, 2), 'utf8');
 }
@@ -318,12 +358,12 @@ async function runDailyExport(opts, day, dailyOut) {
     stdout = await spawnAndWaitCollect(NODE_BIN, [
       path.join(SCRIPT_DIR, 'export-with-self-heal.mjs'),
       ...exportArgs
-    ]);
+    ], { CHAT_AUDIT_BY_DAY_EXPORT: '1' });
   } else {
     stdout = await spawnAndWaitCollect(NODE_BIN, [
       path.join(SCRIPT_DIR, 'export-date-range.js'),
       ...exportArgs
-    ]);
+    ], { CHAT_AUDIT_BY_DAY_EXPORT: '1' });
   }
   return parseDailyExportComplete(stdout);
 }
@@ -359,6 +399,17 @@ async function main() {
   let interruptedDay = '';
 
   if (!opts.mergeOnly) {
+    console.log(
+      JSON.stringify({
+        event: 'export-progress',
+        current: 0,
+        total: dates.length,
+        unit: 'day',
+        reset: true,
+        message: `按天导出 0/${dates.length}：准备中`
+      })
+    );
+
     for (let dayIndex = 0; dayIndex < dates.length; dayIndex++) {
       const day = dates[dayIndex];
       const dailyOut = path.join(outDir, `${opts.basename}-${day}.json`);
@@ -366,26 +417,32 @@ async function main() {
       const staleMarker = !skipReason && hasStaleDailyExportMarker(dailyOut, day, opts);
 
       console.log('');
-      console.log(
-        JSON.stringify({
-          event: 'export-progress',
-          current: dayIndex + 1,
-          total: dates.length,
-          unit: 'day',
-          reset: dayIndex > 0,
-          phase: skipReason ? 'resume' : null,
-          message: skipReason
-            ? `续传跳过 ${dayIndex + 1}/${dates.length}：${day}（已完成）`
-            : `按天导出 ${dayIndex + 1}/${dates.length}：${day}`
-        })
-      );
-
       if (skipReason) {
+        console.log(
+          JSON.stringify({
+            event: 'export-progress',
+            current: dayIndex + 1,
+            total: dates.length,
+            unit: 'day',
+            phase: 'resume',
+            message: `续传跳过 ${dayIndex + 1}/${dates.length}：${day}（已完成）`
+          })
+        );
         console.log(`========== Skip daily target-list export: ${day} (${skipReason}) ==========`);
         console.log(`Output: ${dailyOut}`);
         skippedDays += 1;
         continue;
       }
+
+      console.log(
+        JSON.stringify({
+          event: 'export-progress',
+          current: dayIndex,
+          total: dates.length,
+          unit: 'day',
+          message: `按天导出 ${dayIndex + 1}/${dates.length}：${day}（进行中）`
+        })
+      );
 
       console.log(`========== Daily target-list export: ${day} ==========`);
       console.log(`Output: ${dailyOut}`);
@@ -399,10 +456,37 @@ async function main() {
       const summary = await runDailyExport(opts, day, dailyOut);
       if (summary.complete && summary.failed === 0) {
         writeDailyExportDoneMarker(dailyOut, day, opts);
+        console.log(
+          JSON.stringify({
+            event: 'export-progress',
+            current: dayIndex + 1,
+            total: dates.length,
+            unit: 'day',
+            message: `按天导出 ${dayIndex + 1}/${dates.length}：${day}（已完成）`
+          })
+        );
       } else if (summary.complete && summary.failed > 0) {
-        removeDailyExportDoneMarker(dailyOut);
-        console.warn(
-          `Warning: daily export for ${day} finished with ${summary.failed} failed conversation(s); will retry on next run.`
+        if (isSearchTargetListStrategy(opts)) {
+          writeDailyExportDoneMarker(dailyOut, day, opts, {
+            failedCount: summary.failed
+          });
+          console.warn(
+            `Warning: daily export for ${day} finished with ${summary.failed} failed conversation(s); included in merge (search strategy). Re-run will export this day again.`
+          );
+        } else {
+          removeDailyExportDoneMarker(dailyOut);
+          console.warn(
+            `Warning: daily export for ${day} finished with ${summary.failed} failed conversation(s); will retry on next run.`
+          );
+        }
+        console.log(
+          JSON.stringify({
+            event: 'export-progress',
+            current: dayIndex + 1,
+            total: dates.length,
+            unit: 'day',
+            message: `按天导出 ${dayIndex + 1}/${dates.length}：${day}（已完成，含失败会话）`
+          })
         );
       } else {
         removeDailyExportDoneMarker(dailyOut);
@@ -498,21 +582,41 @@ async function main() {
   }
 
   console.log('');
+  const mergedFailed = countFailedConversations(mergedOut);
   console.log(
     JSON.stringify({
       event: 'export-complete',
-      failed: 0,
+      failed: mergedFailed,
       outputPath: mergedOut,
       mergedDays: mergeInputs.length,
-      totalDays: dates.length
+      totalDays: dates.length,
+      hadDailyFailures: mergedFailed > 0
     })
   );
+  const mergedCsv = generateBusinessCsv(mergedOut, {
+    log: (msg) => console.log(msg),
+    nodeBin: NODE_BIN,
+    cleanup: false
+  });
+  if (mergedCsv && !shouldDeferArtifactCleanup() && !opts.mergeOnly) {
+    cleanupTargetListByDayArtifacts(
+      {
+        outDir,
+        basename: opts.basename,
+        start: opts.start,
+        end: opts.end,
+        dates
+      },
+      { log: (msg) => console.log(msg) }
+    );
+  }
   console.log('✅ Daily target-list export complete');
   if (skippedDays > 0) {
     console.log(`Skipped ${skippedDays} already-complete day(s); merged ${mergeInputs.length} daily file(s).`);
   }
-  console.log(`Merged JSON:  ${mergedOut}`);
-  console.log(`Merged JSONL: ${mergedJsonl}`);
+  if (mergedCsv) {
+    console.log(`Merged CSV:  ${mergedCsv}`);
+  }
 }
 
 main().catch((err) => {

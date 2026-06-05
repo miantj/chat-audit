@@ -11,9 +11,14 @@ import {
 } from './export-script-lib/export-json-stats.mjs';
 import {
   FAILED_RETRY_MAX,
-  readFailedRetryPassesUsed
+  readFailedRetryPassesUsed,
+  shouldScheduleFailedRetry
 } from './export-script-lib/failed-retry-meta.mjs';
 import { MODERATE_PACED_ENV } from './export-script-lib/moderate-paced-env.mjs';
+import {
+  cleanupExportArtifacts,
+  cleanupTargetListByDayArtifacts
+} from './export-script-lib/cleanup-export-artifacts.mjs';
 
 export function countFailedConversations(outputPath) {
   return countFailedFromLib(outputPath, getBundledNodeBin());
@@ -166,16 +171,27 @@ export function runExportEngine(options, eventEmitter) {
     const strategy = options.targetListStrategy || 'visible';
     runnerArgs.push(`--target-list-strategy=${strategy}`);
   }
+  runnerArgs.push('--fast-paced');
 
   const failedCount = countFailedConversations(outputPath);
   const retryPassesUsed = readFailedRetryPassesUsed(outputPath);
   const retryBudgetLeft =
     FAILED_RETRY_MAX - Math.min(retryPassesUsed, FAILED_RETRY_MAX);
+  const canScheduleFailedRetry = shouldScheduleFailedRetry({
+    targetsFile: options.targetsFile || '',
+    targetListStrategy: options.targetListStrategy || 'visible'
+  });
   const resumeFailedOnly =
+    canScheduleFailedRetry &&
     failedCount > 0 &&
     options.fullExport !== true &&
     retryBudgetLeft > 0;
-  if (failedCount > 0 && options.fullExport !== true && retryBudgetLeft <= 0) {
+  if (
+    canScheduleFailedRetry &&
+    failedCount > 0 &&
+    options.fullExport !== true &&
+    retryBudgetLeft <= 0
+  ) {
     eventEmitter?.emit('progress', {
       current: 0,
       total: failedCount,
@@ -213,6 +229,7 @@ export function runExportEngine(options, eventEmitter) {
     CHAT_AUDIT_START_GATE_DONE: '1',
     CHAT_AUDIT_CALLER_CWD: path.resolve(outputDir),
     CHAT_AUDIT_EXPORT_DIR: path.resolve(outputDir),
+    CHAT_AUDIT_DEFER_ARTIFACT_CLEANUP: '1',
     OUTPUT_PATH: outputPath,
     ...(clearMetricCheckpoint
       ? { CHAT_AUDIT_CLEAR_METRIC_CHECKPOINT: '1' }
@@ -406,7 +423,7 @@ export function runExportEngine(options, eventEmitter) {
           return;
         }
         resolve({
-          outputPath,
+          outputPath: csvPath || outputPath,
           csvPath,
           code,
           conversationCount,
@@ -416,6 +433,9 @@ export function runExportEngine(options, eventEmitter) {
           employeeProgressTotal: summary?.employeeProgressTotal ?? 0,
           progressUnit: summary?.progressUnit ?? 'employee'
         });
+        if (csvPath && failed <= 0) {
+          cleanupExportArtifacts(outputPath, { log: () => {} });
+        }
       } else {
         const logText = (stderrBuf || stdoutBuf).trim();
         const exportError = parseExportErrorFromLogs(logText);
@@ -465,6 +485,7 @@ export function runTargetListByDayEngine(options, eventEmitter) {
   }
   const strategy = options.targetListStrategy || 'visible';
   runnerArgs.push(`--target-list-strategy=${strategy}`);
+  runnerArgs.push('--fast-paced');
   runnerArgs.push(`--expect-dept=${expectDept}`);
 
   const exportEnv = {
@@ -477,7 +498,8 @@ export function runTargetListByDayEngine(options, eventEmitter) {
     CHAT_AUDIT_EXPECT_DEPT: expectDept,
     CHAT_AUDIT_START_GATE_DONE: '1',
     CHAT_AUDIT_CALLER_CWD: path.resolve(outputDir),
-    CHAT_AUDIT_EXPORT_DIR: path.resolve(outputDir)
+    CHAT_AUDIT_EXPORT_DIR: path.resolve(outputDir),
+    CHAT_AUDIT_DEFER_ARTIFACT_CLEANUP: '1'
   };
 
   const proc = spawn(nodeBin, runnerArgs, {
@@ -489,6 +511,7 @@ export function runTargetListByDayEngine(options, eventEmitter) {
   let stdoutBuf = '';
   let stderrBuf = '';
   let lineBuf = '';
+  let csvPath = null;
 
   const handleLine = (line) => {
     const trimmed = line.trim();
@@ -497,6 +520,15 @@ export function runTargetListByDayEngine(options, eventEmitter) {
     if (trimmed.startsWith('{')) {
       try {
         const evt = JSON.parse(trimmed);
+        if (evt.event === 'export-csv-complete' && evt.csvPath) {
+          csvPath = evt.csvPath;
+          eventEmitter.emit('progress', {
+            current: 0,
+            total: -1,
+            message: `CSV 已生成: ${evt.csvPath}`
+          });
+          return;
+        }
         if (evt.event === 'export-paused') {
           eventEmitter.emit('paused', {
             message: evt.message || '导出已暂停'
@@ -640,17 +672,25 @@ export function runTargetListByDayEngine(options, eventEmitter) {
         return;
       }
       resolve({
-        outputPath: mergedOut,
-        csvPath: null,
+        outputPath: csvPath || mergedOut,
+        csvPath,
         code,
         conversationCount,
-        failed: 0,
+        failed: summary?.failed ?? 0,
         shutdown: false,
         employeeProgressCurrent: 0,
         employeeProgressTotal: 0,
         progressUnit: 'employee',
         outDir
       });
+      if (csvPath) {
+        cleanupTargetListByDayArtifacts({
+          outDir,
+          basename,
+          start,
+          end
+        });
+      }
     });
   });
 
