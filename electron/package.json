@@ -12,6 +12,7 @@
     "prepare-runtime": "node scripts/prepare-runtime.cjs",
     "prebuild": "node scripts/prepare-runtime.cjs --win-x64 && node scripts/sync-export-lib.cjs && node scripts/copy-ws-to-scripts.cjs",
     "prebuild:mac": "node scripts/prepare-runtime.cjs && node scripts/sync-export-lib.cjs && node scripts/copy-ws-to-scripts.cjs",
+    "prebuild:dir": "node scripts/prepare-runtime.cjs --win-x64 && node scripts/sync-export-lib.cjs && node scripts/copy-ws-to-scripts.cjs",
     "build": "electron-builder --win --x64",
     "build:mac": "electron-builder --mac",
     "build:mac:arm64": "electron-builder --mac --arm64",

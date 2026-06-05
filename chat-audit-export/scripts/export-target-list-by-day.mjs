@@ -435,19 +435,26 @@ async function main() {
     const dailyJson = path.join(outDir, `${opts.basename}-${day}.json`);
     if (!fs.existsSync(dailyJson)) {
       console.warn(`Warning: missing daily export, not merging: ${dailyJson}`);
+      mergeSkippedIncomplete += 1;
       continue;
     }
     const size = fs.statSync(dailyJson).size;
     if (size === 0) {
       console.warn(`Warning: empty daily export (0 bytes), not merging: ${dailyJson}`);
+      mergeSkippedIncomplete += 1;
       continue;
     }
-    if (!isDailyExportComplete(dailyJson, day, opts)) {
+    if (!opts.mergeOnly && !isDailyExportComplete(dailyJson, day, opts)) {
       console.warn(
         `Warning: daily export for ${day} is not marked complete, not merging: ${dailyJson}`
       );
       mergeSkippedIncomplete += 1;
       continue;
+    }
+    if (opts.mergeOnly && !isDailyExportComplete(dailyJson, day, opts)) {
+      console.warn(
+        `Warning: daily export for ${day} has no matching .export-done marker; merging anyway (--merge-only).`
+      );
     }
     mergeInputs.push(`--in=${dailyJson}`);
   }
@@ -466,15 +473,43 @@ async function main() {
     `--jsonl=${mergedJsonl}`
   ]);
 
+  const incompleteDays = dates.length - mergeInputs.length;
+  if (!opts.mergeOnly && incompleteDays > 0) {
+    console.log('');
+    if (mergeSkippedIncomplete > 0) {
+      console.log(
+        `Excluded ${mergeSkippedIncomplete} incomplete day(s) from merge (missing, empty, or no matching .export-done marker).`
+      );
+    }
+    console.log(
+      JSON.stringify({
+        event: 'export-error',
+        message: `按天合并不完整：${incompleteDays}/${dates.length} 天未纳入合并（失败会话、未完成或缺失导出）。merged.json 不含这些日期的数据，请修复后重新运行以补全。`,
+        mergeSkippedIncomplete: incompleteDays,
+        incompleteDays,
+        mergedDays: mergeInputs.length,
+        totalDays: dates.length,
+        outputPath: mergedOut
+      })
+    );
+    console.log(`Merged JSON (partial):  ${mergedOut}`);
+    console.log(`Merged JSONL (partial): ${mergedJsonl}`);
+    process.exit(1);
+  }
+
   console.log('');
+  console.log(
+    JSON.stringify({
+      event: 'export-complete',
+      failed: 0,
+      outputPath: mergedOut,
+      mergedDays: mergeInputs.length,
+      totalDays: dates.length
+    })
+  );
   console.log('✅ Daily target-list export complete');
   if (skippedDays > 0) {
     console.log(`Skipped ${skippedDays} already-complete day(s); merged ${mergeInputs.length} daily file(s).`);
-  }
-  if (mergeSkippedIncomplete > 0) {
-    console.log(
-      `Excluded ${mergeSkippedIncomplete} incomplete day(s) from merge (no matching .export-done marker).`
-    );
   }
   console.log(`Merged JSON:  ${mergedOut}`);
   console.log(`Merged JSONL: ${mergedJsonl}`);

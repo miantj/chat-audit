@@ -71,6 +71,37 @@ function parseExportErrorFromLogs(logText) {
   return null;
 }
 
+function parseTargetListByDayIncompleteFromLogs(logText) {
+  const lines = logText.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line.startsWith('{')) {
+      continue;
+    }
+    try {
+      const ev = JSON.parse(line);
+      if (ev.event !== 'export-error') {
+        continue;
+      }
+      const incompleteDays = Number(ev.incompleteDays ?? ev.mergeSkippedIncomplete ?? 0);
+      if (incompleteDays <= 0) {
+        continue;
+      }
+      return {
+        message:
+          ev.message ||
+          `按天合并不完整：${incompleteDays} 天未纳入合并（失败会话、未完成或缺失导出）。`,
+        incompleteDays,
+        mergeSkippedIncomplete: Number(ev.mergeSkippedIncomplete ?? incompleteDays),
+        outputPath: ev.outputPath || null
+      };
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
 function parseExportSummaryFromLogs(logText) {
   const lines = logText.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -571,51 +602,55 @@ export function runTargetListByDayEngine(options, eventEmitter) {
       if (lineBuf.trim()) handleLine(lineBuf.trim());
       const summary = parseExportSummaryFromLogs(stdoutBuf);
       const shutdown = summary?.shutdown ?? false;
+      const incomplete = parseTargetListByDayIncompleteFromLogs(stdoutBuf);
 
-      if (code === 0) {
-        if (shutdown) {
-          resolve({
-            outputPath: null,
-            csvPath: null,
-            code,
-            conversationCount: 0,
-            failed: 0,
-            shutdown: true,
-            employeeProgressCurrent: 0,
-            employeeProgressTotal: 0,
-            progressUnit: 'day',
-            outDir
-          });
-          return;
-        }
-        let conversationCount = 0;
-        try {
-          conversationCount = countExportedConversations(mergedOut);
-        } catch (err) {
-          reject(err);
-          return;
-        }
+      if (code === 0 && shutdown) {
         resolve({
-          outputPath: mergedOut,
+          outputPath: null,
           csvPath: null,
           code,
-          conversationCount,
+          conversationCount: 0,
           failed: 0,
-          shutdown: false,
+          shutdown: true,
           employeeProgressCurrent: 0,
           employeeProgressTotal: 0,
-          progressUnit: 'employee',
+          progressUnit: 'day',
           outDir
         });
-      } else {
+        return;
+      }
+
+      if (incomplete || code !== 0) {
         const logText = `${stdoutBuf}\n${stderrBuf}`.trim();
-        const parsed = parseExportErrorFromLogs(logText);
+        const parsed =
+          incomplete?.message || parseExportErrorFromLogs(logText);
         reject(
           new Error(
             parsed || `按天目标名单导出失败 (exit ${code})`
           )
         );
+        return;
       }
+
+      let conversationCount = 0;
+      try {
+        conversationCount = countExportedConversations(mergedOut);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      resolve({
+        outputPath: mergedOut,
+        csvPath: null,
+        code,
+        conversationCount,
+        failed: 0,
+        shutdown: false,
+        employeeProgressCurrent: 0,
+        employeeProgressTotal: 0,
+        progressUnit: 'employee',
+        outDir
+      });
     });
   });
 
