@@ -1,0 +1,7 @@
+.env
+exports/
+logs/
+*.zip
+node_modules/
+.qiyu-lark-*
+.DS_Store
