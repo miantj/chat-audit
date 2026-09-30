@@ -766,8 +766,16 @@ async def cmd_check_department(cdp_base: str) -> None:
     print(f"Current cascader state: {raw}")
 
 
+def _department_search_keyword(group_name: str) -> str:
+    """级联是虚拟列表，只渲染约 10 项。用名称前缀搜索后再点建议项。"""
+    if group_name.endswith("-总") and len(group_name) > 2:
+        return group_name[:-2]
+    return group_name
+
+
 async def cmd_set_department(cdp_base: str, group_name: str) -> None:
     group_js = json.dumps(group_name)
+    keyword_js = json.dumps(_department_search_keyword(group_name))
     open_expr = """
 (function() {
     var trigger = document.querySelector('.hj-cascader .el-cascader__tags') ||
@@ -776,27 +784,41 @@ async def cmd_set_department(cdp_base: str, group_name: str) -> None:
     return 'trigger not found';
 })()
 """
+    # 搜索框过滤后再点建议项。虚拟列表里目标节点不在 DOM 中，直接 query 会 option not found。
     select_expr = f"""
 (function() {{
     var groupName = {group_js};
-    var nodes = document.querySelectorAll('.el-cascader-node__label');
-    for (var node of nodes) {{
-        if (node.textContent.trim() === groupName) {{
-            var parent = node.closest('.el-cascader-node');
-            var checkbox = parent.querySelector('.el-checkbox__input');
-            if (!checkbox) {{
-                node.click();
-                return 'clicked ' + node.textContent.trim();
-            }}
-            var isChecked = parent.querySelector('.el-checkbox.is-checked');
-            if (isChecked) {{
-                return 'already checked, skipping';
-            }}
-            checkbox.click();
-            return 'checked ' + node.textContent.trim();
-        }}
+    var keyword = {keyword_js};
+    var root = document.querySelector('.hj-cascader');
+    if (!root || !root.__vue__) return 'cascader not found';
+    var vue = root.__vue__;
+    var tags = Array.from(root.querySelectorAll('.el-tag')).map(function(t) {{
+        return (t.innerText || '').replace(/\\s+/g, ' ').trim();
+    }});
+    if (tags.indexOf(groupName) >= 0) return 'already checked, skipping';
+    var input = root.querySelector('.el-cascader__search-input');
+    if (input) {{
+        input.focus();
+        input.value = keyword;
     }}
-    return 'option not found';
+    vue.inputValue = keyword;
+    if (typeof vue.getSuggestions !== 'function') return 'getSuggestions missing';
+    vue.getSuggestions();
+    var list = vue.suggestions || [];
+    var idx = -1;
+    for (var i = 0; i < list.length; i++) {{
+        var text = String(list[i].text || list[i].label || '').trim();
+        if (text === groupName) {{ idx = i; break; }}
+    }}
+    if (idx < 0) {{
+        var preview = list.slice(0, 8).map(function(n) {{
+            return String(n.text || n.label || '').trim();
+        }});
+        return 'option not found: ' + preview.join(' | ');
+    }}
+    if (list[idx].checked) return 'already checked, skipping';
+    vue.handleSuggestionClick(idx);
+    return 'checked ' + groupName;
 }})()
 """
     close_expr = """
@@ -809,17 +831,10 @@ async def cmd_set_department(cdp_base: str, group_name: str) -> None:
     verify_expr = f"""
 (function() {{
     var groupName = {group_js};
-    var nodes = document.querySelectorAll('.el-cascader-node__label');
-    for (var node of nodes) {{
-        if (node.textContent.trim() === groupName) {{
-            var parent = node.closest('.el-cascader-node');
-            var checkbox = parent.querySelector('.el-checkbox');
-            return JSON.stringify({{
-                checked: checkbox ? checkbox.className.includes('is-checked') : false
-            }});
-        }}
-    }}
-    return JSON.stringify({{checked: false, note: 'node not found'}});
+    var tags = Array.from(document.querySelectorAll('.hj-cascader .el-tag')).map(function(t) {{
+        return (t.innerText || '').replace(/\\s+/g, ' ').trim();
+    }});
+    return JSON.stringify({{ checked: tags.indexOf(groupName) >= 0, tags: tags }});
 }})()
 """
     targets = _list_targets(cdp_base)
@@ -828,15 +843,21 @@ async def cmd_set_department(cdp_base: str, group_name: str) -> None:
         raise SystemExit(1)
     async with CDPSession(page["webSocketDebuggerUrl"]) as sess:
         await sess.send("Runtime.enable", {})
-        await sess.evaluate(open_expr)
+        opened = await sess.evaluate(open_expr)
+        print(f"Open result: {opened}")
         await asyncio.sleep(0.7)
         sel = await sess.evaluate(select_expr)
         print(f"Select result: {sel}")
+        if not str(sel).startswith(("checked", "already")):
+            raise SystemExit(f"ERROR: set-department failed: {sel}")
         await asyncio.sleep(0.7)
         await sess.evaluate(close_expr)
         await asyncio.sleep(1.2)
         ver = await sess.evaluate(verify_expr)
         print(f"Verify result: {ver}")
+        parsed = json.loads(ver)
+        if not parsed.get("checked"):
+            raise SystemExit(f"ERROR: department tag missing after select: {ver}")
 
 
 def _normalize_date_display(s: str) -> str:
