@@ -205,7 +205,27 @@ function downloadUrl(url, dest, redirects = 0) {
 
 function isSessionExpired(value) {
   const text = value instanceof Error ? value.message : JSON.stringify(value);
-  return /8001|session\s*(?:is\s*)?timeout|无 csrf token|登录页/i.test(text || '');
+  return /8001|session\s*(?:is\s*)?timeout|无 csrf token|登录页|SecurityError|Access is denied/i.test(
+    text || ''
+  );
+}
+
+/** 经 CDP 取 csrf，避开 document.cookie 在异常页/受限文档上的 SecurityError */
+async function getCsrfToken(cdp) {
+  await cdp.send('Network.enable');
+  const { cookies } = await cdp.send('Network.getCookies', { urls: [QIYU_HISTORY_URL] });
+  const hit = (cookies || []).find((c) => /^(?:___csrfToken|__csrfToken)$/.test(c.name));
+  const tk = String(hit?.value || '').trim();
+  if (!tk || tk === 'undefined') throw new Error('无 csrf token，请先 login');
+  return tk;
+}
+
+async function pageHref(cdp) {
+  try {
+    return String((await cdp.evaluate('location.href')) || '');
+  } catch {
+    return '';
+  }
 }
 
 function isBusyDownload(value) {
@@ -227,13 +247,26 @@ function autoLogin() {
   }
 }
 
-/** 登录后进会话页，等 csrf / cookie 就绪再打导出接口 */
+/**
+ * 落到会话历史页。返回 'ok' | 'login'。
+ * 异常页（chrome-error / about:blank）会强制导航，避免 document/cookie 受限。
+ */
 async function settleHistoryPage(cdp) {
   await cdp.send('Page.enable');
-  await cdp.goto(QIYU_HISTORY_URL);
-  await sleep(2500);
-  const stillLogin = await cdp.evaluate(`/\\/login/i.test(location.pathname)`);
-  if (stillLogin) throw new Error('登录后仍在登录页');
+  let href = await pageHref(cdp);
+  const bad =
+    !href ||
+    /chrome-error:|chrome:\/\/|about:blank|devtools:/i.test(href) ||
+    !/qiyukf\.com/i.test(href);
+  const onHistory = /\/madmin\/session\/history/i.test(href) && !/\/login/i.test(href);
+  if (bad || !onHistory) {
+    await cdp.goto(QIYU_HISTORY_URL);
+    await sleep(2500);
+    href = await pageHref(cdp);
+  }
+  if (/\/login/i.test(href)) return 'login';
+  if (!/qiyukf\.com/i.test(href)) throw new Error(`页面异常：${href || '(空)'}`);
+  return 'ok';
 }
 
 async function downloadTask(start, end) {
@@ -248,14 +281,16 @@ async function downloadTask(start, end) {
     try {
       await cdp.connect();
       await cdp.send('Runtime.enable');
-      if (loggedIn || attempt > 0) await settleHistoryPage(cdp);
+      const settled = await settleHistoryPage(cdp);
+      if (settled === 'login') relogin = true;
 
       let create;
-      try {
-        create = await cdp.evaluate(`(async () => {
-    const m = document.cookie.match(/(?:___csrfToken|__csrfToken)=([^;]+)/);
-    const tk = m ? m[1] : '';
-    if (!tk) throw new Error('无 csrf token，请先 login');
+      let csrf = '';
+      if (!relogin) {
+        try {
+          csrf = await getCsrfToken(cdp);
+          create = await cdp.evaluate(`(async () => {
+    const tk = ${JSON.stringify(csrf)};
     const requestedAt = Date.now();
     const body = {
       offset: 0,
@@ -278,9 +313,10 @@ async function downloadTask(start, end) {
     });
     return { tkLen: tk.length, json: await res.json(), requestedAt, responseAt: Date.now() };
     })()`);
-      } catch (error) {
-        if (!loggedIn && isSessionExpired(error)) relogin = true;
-        else throw error;
+        } catch (error) {
+          if (!loggedIn && isSessionExpired(error)) relogin = true;
+          else throw error;
+        }
       }
 
       if (!relogin) {
@@ -299,9 +335,9 @@ async function downloadTask(start, end) {
           await sleep(3000);
           let list;
           try {
+            if (!csrf) csrf = await getCsrfToken(cdp);
             list = await cdp.evaluate(`(async () => {
-      const m = document.cookie.match(/(?:___csrfToken|__csrfToken)=([^;]+)/);
-      const tk = m ? m[1] : '';
+      const tk = ${JSON.stringify(csrf)};
       const res = await fetch('/api/download/task/list?limit=10&offset=0&token=' + encodeURIComponent(tk), {
         credentials: 'include',
         headers: { Accept: 'application/json' }

@@ -98,7 +98,11 @@ export async function ensureChrome(cdpBase = DEFAULT_CDP, openUrl = QIYU_HISTORY
 /** 选七鱼相关 page target，没有则 /json/new */
 export async function pickPageTarget(cdpBase = DEFAULT_CDP, preferUrl = QIYU_HISTORY_URL) {
   let targets = await listTargets(cdpBase);
-  let pages = targets.filter((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+  const usable = (t) =>
+    t.type === 'page' &&
+    t.webSocketDebuggerUrl &&
+    !/chrome-error:|chrome:\/\/|devtools:|about:blank/i.test(t.url || '');
+  let pages = targets.filter(usable);
   const isLogin = (t) => /\/login/i.test(t.url || '');
   let hit =
     pages.find((t) => /qiyukf\.com/i.test(t.url || '') && !isLogin(t)) ||
