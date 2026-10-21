@@ -137,11 +137,19 @@ function main() {
         byHeader(hdr, row, '会话时长')
       ) || byHeader(hdr, row, '会话结束时间');
     const qiyuCategory = byHeader(hdr, row, '咨询分类');
-    const userId =
+    const rawUserId =
       byHeader(hdr, row, '用户唯一标识') || byHeader(hdr, row, '访客用户名');
+    // 一手用户id 须为数字；七鱼 Guest 常见「--」，写空避免下游飞书 Int64 校验整表失败
+    const userId = /^\d+$/.test(String(rawUserId || '').trim())
+      ? String(rawUserId).trim()
+      : '';
     const tags = byHeader(hdr, row, '客户标签');
     const content = byHeader(hdr, row, '会话内容');
-    const { goodsNo, userQuestion } = parseContent(content, userId, byHeader(hdr, row, '访客用户名'));
+    const { goodsNo, userQuestion } = parseContent(
+      content,
+      rawUserId,
+      byHeader(hdr, row, '访客用户名')
+    );
     const { category, source } = resolveCategory(userQuestion, qiyuCategory);
     if (source === 'doc') fromDoc++;
     else fromQiyu++;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 安装 / 卸载 macOS launchd：每天 13:00 / 18:00 / 00:00 跑 scripts/daily-update.sh
+# 安装 / 卸载 macOS launchd：每天 13:00 / 16:00 / 18:00 / 00:00 跑 scripts/daily-update.sh
 #   ./scripts/install-daily-update.sh          # 安装并启用
 #   ./scripts/install-daily-update.sh uninstall
 set -euo pipefail
@@ -46,6 +46,12 @@ install() {
     </dict>
     <dict>
       <key>Hour</key>
+      <integer>16</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
       <integer>18</integer>
       <key>Minute</key>
       <integer>0</integer>
@@ -79,7 +85,7 @@ EOF
   echo "已安装 ${LABEL}"
   echo "  plist:  $PLIST"
   echo "  脚本:   $SCRIPT"
-  echo "  计划:   每天 13:00 / 18:00 / 00:00（本机时区）拉取当日数据"
+  echo "  计划:   每天 13:00 / 16:00 / 18:00 / 00:00（本机时区）拉取当日数据"
   echo "          （00:00 对应 24 点档，取刚结束的那天）"
   echo "  日志:   $ROOT/logs/"
   echo "  试跑:   $SCRIPT"

@@ -47,7 +47,7 @@ cd qiyu
 ./scripts/install-daily-update.sh uninstall
 ```
 
-- 13:00、18:00：拉**当天**数据，同名飞书子表覆盖  
+- 13:00、16:00、18:00：拉**当天**数据，同名飞书子表覆盖  
 - 00:00（24 点）：拉**刚结束的那天**（收口）  
 日志在 `qiyu/logs/daily-update-YYYY-MM-DD.log`。
 ## 浏览器控制（CDP）

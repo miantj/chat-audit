@@ -4,6 +4,7 @@
  * - 按下载日建/覆盖同名子表（如 2026-09-27）
  * - 仅 9 列：AI咨询分类/七鱼咨询分类/日期/会话结束时间/一手用户id/会话id/是否疑似c端/货号/用户问题
  */
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -35,21 +36,42 @@ function loadEnv() {
   }
 }
 
-function runLark(args) {
-  const result = spawnSync('lark-cli', args, { cwd: ROOT, encoding: 'utf8' });
-  if (result.error?.code === 'ENOENT') {
-    throw new Error(
-      '未找到 lark-cli。请先安装并登录：npm i -g @larksuite/cli && lark-cli auth login'
-    );
+export function runLark(args) {
+  // 仅重试本脚本的读取、定址覆盖操作；创建子表/删除行可能已生效，不能盲目重放。
+  const retryable = args[0] === 'sheets' && [
+    '+workbook-info', '+csv-get', '+table-put', '+cells-set',
+    '+range-copy', '+styles-put', '+dropdown-set', '+dropdown-delete'
+  ].includes(args[1]);
+  for (let attempt = 1; ; attempt++) {
+    const result = spawnSync('lark-cli', args, { cwd: ROOT, encoding: 'utf8' });
+    if (result.error?.code === 'ENOENT') {
+      throw new Error(
+        '未找到 lark-cli。请先安装并登录：npm i -g @larksuite/cli && lark-cli auth login'
+      );
+    }
+    let apiError;
+    for (const text of [result.stderr, result.stdout]) {
+      try {
+        const output = JSON.parse(text);
+        if (output?.ok === false || output?.error) {
+          apiError = output;
+          break;
+        }
+      } catch {
+        // stderr 可能是普通提示；成功响应仍由下方严格解析。
+      }
+    }
+    if (result.status === 0 && !apiError) return JSON.parse(result.stdout);
+    const message = result.stderr?.trim() || result.stdout?.trim() ||
+      result.error?.message || `lark-cli 失败（exit ${result.status}）：${args.slice(0, 2).join(' ')}`;
+    if (!retryable || attempt >= 3 ||
+        apiError?.error?.type !== 'network' || apiError.error.subtype !== 'timeout') {
+      throw new Error(message);
+    }
+    const delay = 2000 * attempt;
+    console.error(`[lark] ${args.slice(0, 2).join(' ')} 超时，${delay / 1000} 秒后重试（${attempt + 1}/3）`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
   }
-  if (result.status !== 0) {
-    throw new Error(
-      result.stderr?.trim() ||
-        result.stdout?.trim() ||
-        `lark-cli 失败（exit ${result.status}）：${args.join(' ')}`
-    );
-  }
-  return JSON.parse(result.stdout);
 }
 
 function parseCsv(text) {
@@ -119,9 +141,10 @@ function splitCategories(raw, options) {
   return [...new Set(parts.filter(Boolean))];
 }
 
-function numericId(value, name) {
+/** 七鱼偶发用 -- / — 表示无一手用户 id；空与占位都当缺省，不阻断整表写入 */
+export function numericId(value, name) {
   const text = String(value || '').trim();
-  if (!text) return null;
+  if (!text || /^-+$/.test(text) || text === '—' || /^n\/?a$/i.test(text)) return null;
   if (!/^\d+$/.test(text)) throw new Error(`${name} 不是纯数字：${text}`);
   const number = Number(text);
   if (!Number.isSafeInteger(number)) throw new Error(`${name} 超出安全整数范围：${text}`);
@@ -488,4 +511,15 @@ function main() {
   );
 }
 
-main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.argv.includes('--self-check')) {
+    assert.equal(numericId('', '一手用户id'), null);
+    assert.equal(numericId('--', '一手用户id'), null);
+    assert.equal(numericId('—', '一手用户id'), null);
+    assert.equal(numericId('20390656', '一手用户id'), 20390656);
+    assert.throws(() => numericId('Guest1', '一手用户id'), /不是纯数字/);
+    console.log('numericId ok');
+  } else {
+    main();
+  }
+}

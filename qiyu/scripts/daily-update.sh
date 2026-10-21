@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 拉取当日七鱼会话 → 售前登记 CSV → 飞书表格
-# launchd：每天 13:00 / 18:00 / 00:00（24 点）；也可手动：./scripts/daily-update.sh
+# launchd：每天 13:00 / 16:00 / 18:00 / 00:00（24 点）；也可手动：./scripts/daily-update.sh
 # 手动可指定：./scripts/daily-update.sh 2026-09-28
 set -euo pipefail
 
