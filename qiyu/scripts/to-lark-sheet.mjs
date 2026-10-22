@@ -4,7 +4,6 @@
  * - 按下载日建/覆盖同名子表（如 2026-09-27）
  * - 仅 9 列：AI咨询分类/七鱼咨询分类/日期/会话结束时间/一手用户id/会话id/是否疑似c端/货号/用户问题
  */
-import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -512,14 +511,5 @@ function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv.includes('--self-check')) {
-    assert.equal(numericId('', '一手用户id'), null);
-    assert.equal(numericId('--', '一手用户id'), null);
-    assert.equal(numericId('—', '一手用户id'), null);
-    assert.equal(numericId('20390656', '一手用户id'), 20390656);
-    assert.throws(() => numericId('Guest1', '一手用户id'), /不是纯数字/);
-    console.log('numericId ok');
-  } else {
-    main();
-  }
+  main();
 }

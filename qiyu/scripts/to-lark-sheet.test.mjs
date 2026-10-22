@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { afterEach, mock, test } from 'node:test';
-import { runLark } from './to-lark-sheet.mjs';
+import { numericId, runLark } from './to-lark-sheet.mjs';
 
 const timeout = {
   ok: false,
@@ -25,6 +25,16 @@ function stub(t, results) {
 afterEach(() => {
   mock.restoreAll();
   syncBuiltinESMExports();
+});
+
+test('数字 ID 保留数值，占位符留空，非法值和超出安全整数范围时报错', () => {
+  for (const value of ['', '--', '—', '-', 'N/A', 'na', '  ']) {
+    assert.equal(numericId(value, '一手用户id'), null);
+  }
+  assert.equal(numericId('20390656', '一手用户id'), 20390656);
+  assert.equal(numericId(' 20390656 ', '一手用户id'), 20390656);
+  assert.throws(() => numericId('Guest1', '一手用户id'), /不是纯数字/);
+  assert.throws(() => numericId('9007199254740992', '会话id'), /超出安全整数范围/);
 });
 
 test('覆盖写入超时后重试原请求，并返回成功结果', (t) => {
