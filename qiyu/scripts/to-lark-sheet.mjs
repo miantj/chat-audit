@@ -2,23 +2,30 @@
 /**
  * 售前登记 CSV → 飞书「2026售前登记」知识库表格
  * - 按下载日建/覆盖同名子表（如 2026-09-27）
- * - 仅 9 列：AI咨询分类/七鱼咨询分类/日期/会话结束时间/一手用户id/会话id/是否疑似c端/货号/用户问题
+ * - 12 列：原登记字段 + 没有疑似c端标签但是是c端/有疑似c端标签确认是c端/无法判断
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { REGISTER_HEADERS } from './to-register.mjs';
+import { REGISTER_HEADERS, CUSTOMER_CHECK_HEADERS } from './to-register.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const DEFAULT_URL =
-  process.env.QIYU_LARK_SHEET_URL ||
   'https://yb7ao262ru.feishu.cn/wiki/Y8niwzMiliLdyUkb21VcMVqHnMe?sheet=ej5BzF';
 const WIKI_NODE = 'Y8niwzMiliLdyUkb21VcMVqHnMe';
 const TEMPLATE_SHEET_ID = 'ej5BzF';
-const TEMPLATE_ROWS = 102;
 const OPTIONS_SHEET_NAME = 'Sheet2';
+const SHEET_COLUMNS = 'ABCDEFGHIJKL';
+const STYLE_KEYS = [
+  'background_color', 'font_color', 'font_family', 'font_line', 'font_size',
+  'font_style', 'font_weight', 'horizontal_alignment', 'number_format',
+  'vertical_alignment', 'word_wrap'
+];
+if (SHEET_COLUMNS.length !== REGISTER_HEADERS.length) {
+  throw new Error('飞书列范围与登记表头列数不一致');
+}
 
 function arg(name) {
   const i = process.argv.indexOf(name);
@@ -38,7 +45,7 @@ function loadEnv() {
 export function runLark(args) {
   // 仅重试本脚本的读取、定址覆盖操作；创建子表/删除行可能已生效，不能盲目重放。
   const retryable = args[0] === 'sheets' && [
-    '+workbook-info', '+csv-get', '+table-put', '+cells-set',
+    '+workbook-info', '+sheet-info', '+cells-get', '+csv-get', '+table-put', '+cells-set',
     '+range-copy', '+styles-put', '+dropdown-set', '+dropdown-delete'
   ].includes(args[1]);
   for (let attempt = 1; ; attempt++) {
@@ -164,7 +171,55 @@ function datetimeValue(value) {
   return match ? `${match[1]}T${match[2]}:00` : '';
 }
 
-function main() {
+function rowSpanCovers(span, row) {
+  if (typeof span !== 'string' || !/^\d+(:\d+)?$/.test(span)) return false;
+  const [start, end = start] = span.split(':').map(Number);
+  return start <= row && row <= end;
+}
+
+function rowHeightForPut(layout, row) {
+  const hit = layout?.row_heights?.find((item) => rowSpanCovers(item?.rows ?? item?.range, row));
+  if (hit?.type === 'auto') return { type: 'auto' };
+  const size = Number(hit?.height ?? hit?.size);
+  if (!Number.isFinite(size) || size <= 0) throw new Error('模板正文行高读取失败，停止覆盖');
+  return { type: 'pixel', size };
+}
+
+function borderForPut(raw) {
+  if (!raw || typeof raw !== 'object') return;
+  const border = {};
+  for (const side of ['top', 'bottom', 'left', 'right']) {
+    const spec = raw[side];
+    if (!spec || typeof spec !== 'object') continue;
+    const item = {};
+    for (const key of ['style', 'weight', 'color']) {
+      if (typeof spec[key] === 'string' && spec[key]) item[key] = spec[key];
+    }
+    if (Object.keys(item).length) border[side] = item;
+  }
+  if (Object.keys(border).length) return border;
+}
+
+function styleForPut(cell) {
+  const src = cell?.cell_styles;
+  const style = {};
+  if (src && typeof src === 'object') {
+    for (const key of STYLE_KEYS) {
+      const value = src[key];
+      if (value == null || value === '') continue;
+      if (key === 'font_size') {
+        const size = Number(value);
+        if (Number.isFinite(size) && size > 0) style.font_size = size;
+      } else if (typeof value === 'string') style[key] = value;
+    }
+  }
+  const border = borderForPut(cell?.border_styles) || borderForPut(src?.border_styles);
+  if (border) style.border_styles = border;
+  if (!Object.keys(style).length) throw new Error('模板正文样式读取不完整，停止覆盖');
+  return style;
+}
+
+export function main() {
   loadEnv();
   const inputArg = arg('--in');
   if (!inputArg) throw new Error('缺少 --in CSV 文件');
@@ -178,6 +233,9 @@ function main() {
 
   const rows = parseCsv(fs.readFileSync(input, 'utf8'));
   const headers = rows.shift() || [];
+  if (REGISTER_HEADERS.some((name) => headers.filter((header) => header === name).length !== 1)) {
+    throw new Error('CSV 表头缺失或重复，请重新生成完整的十二列登记数据；停止覆盖');
+  }
   const records = rows.filter((row) => row.some((value) => String(value || '').trim()));
   if (!records.length) throw new Error('CSV 没有数据');
 
@@ -213,6 +271,33 @@ function main() {
     '--format',
     'json'
   ]);
+  const templateRows = Number(info.data?.sheets?.find((sheet) => sheet.sheet_id === TEMPLATE_SHEET_ID)?.row_count);
+  if (!Number.isInteger(templateRows) || templateRows < 2) throw new Error('模板至少需要表头和一行正文样式');
+  const dataEnd = data.length + 1;
+  const templateRow = `A${templateRows}:${SHEET_COLUMNS.at(-1)}${templateRows}`;
+  let templateRange;
+  let templateHeight;
+  if (dataEnd > templateRows) {
+    const templateLayout = runLark([
+      'sheets', '+sheet-info', '--as', 'user', '--url', targetUrl,
+      '--sheet-id', TEMPLATE_SHEET_ID, '--range', templateRow,
+      '--include', 'row_heights', '--format', 'json'
+    ]).data;
+    const templateCells = runLark([
+      'sheets', '+cells-get', '--as', 'user', '--url', targetUrl,
+      '--sheet-id', TEMPLATE_SHEET_ID, '--range', templateRow,
+      '--include', 'style', '--format', 'json'
+    ]).data;
+    templateRange = templateCells?.ranges?.[0];
+    if (templateCells?.has_more || templateRange?.truncated ||
+        templateRange?.actual_range !== templateRow ||
+        Number(templateRange?.row_indices?.[0]) !== templateRows ||
+        templateRange?.col_indices?.join('') !== SHEET_COLUMNS ||
+        templateRange?.cells?.[0]?.length !== REGISTER_HEADERS.length) {
+      throw new Error('模板正文样式读取不完整，停止覆盖');
+    }
+    templateHeight = rowHeightForPut(templateLayout, templateRows);
+  }
   const optionsSheet = (info.data?.sheets || []).find((sheet) => sheet.sheet_name === OPTIONS_SHEET_NAME);
   if (!optionsSheet?.sheet_id) throw new Error(`未找到分类选项表：${OPTIONS_SHEET_NAME}`);
   const optionsOut = runLark([
@@ -305,7 +390,8 @@ function main() {
           是否疑似c端: 'object',
           // 多货号记录以单元格内换行保留；单货号按数字写入。
           货号: 'object',
-          用户问题: 'object'
+          用户问题: 'object',
+          ...Object.fromEntries(CUSTOMER_CHECK_HEADERS.map((name) => [name, 'object']))
         },
         formats: {
           日期: 'yyyy/MM/dd',
@@ -357,9 +443,8 @@ function main() {
   const sheetId = sheet?.sheet_id || '';
   if (!sheetId) throw new Error(`未找到新建子表：${sheetName}`);
 
-  const dataEnd = data.length + 1;
   // sheet-copy 会带上模板样例行；table-put 只覆盖写入块，多出来的行要删掉，否则残留假数据。
-  if (dataEnd < TEMPLATE_ROWS) {
+  if (dataEnd < templateRows) {
     runLark([
       'sheets',
       '+dim-delete',
@@ -370,7 +455,7 @@ function main() {
       '--sheet-id',
       sheetId,
       '--range',
-      `${dataEnd + 1}:${TEMPLATE_ROWS}`,
+      `${dataEnd + 1}:${templateRows}`,
       '--yes',
       '--format',
       'json'
@@ -405,7 +490,7 @@ function main() {
     fs.rmSync(categoriesFile, { force: true });
   }
 
-  const formatEnd = Math.min(TEMPLATE_ROWS, dataEnd);
+  const formatEnd = Math.min(templateRows, dataEnd);
   runLark([
     'sheets',
     '+range-copy',
@@ -418,28 +503,28 @@ function main() {
     '--target-sheet-id',
     sheetId,
     '--source-range',
-    `A1:I${formatEnd}`,
+    `A1:${SHEET_COLUMNS.at(-1)}${formatEnd}`,
     '--target-range',
-    `A1:I${formatEnd}`,
+    `A1:${SHEET_COLUMNS.at(-1)}${formatEnd}`,
     '--paste-type',
     'formats',
     '--format',
     'json'
   ]);
-  const bodyStyles = [
+  const bodyStyles = [];
+  if (dataEnd > templateRows) {
+    // 模板最后一行作为新增正文行的样式；现有模板行及列宽由 sheet-copy 保留。
+    bodyStyles.push(...templateRange.cells[0].map((cell, index) => ({
+      range: `${templateRange.col_indices[index]}${templateRows + 1}:${templateRange.col_indices[index]}${dataEnd}`,
+      ...styleForPut(cell)
+    })));
+  }
+  bodyStyles.push(
     { range: `C2:C${dataEnd}`, number_format: 'yyyy/MM/dd' },
     { range: `D2:D${dataEnd}`, number_format: 'yyyy/MM/dd HH:mm' },
     { range: `E2:F${dataEnd}`, number_format: '0' },
     { range: `H2:H${dataEnd}`, number_format: '0' }
-  ];
-  if (dataEnd >= 103) {
-    bodyStyles.push(
-      { range: `A103:F${dataEnd}`, font_family: '微软雅黑', font_size: 13, font_color: 'rgb(0, 0, 0)', horizontal_alignment: 'center', vertical_alignment: 'middle' },
-      { range: `G103:G${dataEnd}`, font_family: '微软雅黑', font_size: 13, font_color: 'rgb(31, 35, 41)', horizontal_alignment: 'center', vertical_alignment: 'middle' },
-      { range: `H103:H${dataEnd}`, font_family: '微软雅黑', font_size: 13, font_color: 'rgb(0, 0, 0)', horizontal_alignment: 'center', vertical_alignment: 'middle' },
-      { range: `I103:I${dataEnd}`, font_family: '微软雅黑', font_size: 13, font_color: 'rgb(31, 35, 41)', horizontal_alignment: 'center', vertical_alignment: 'middle' }
-    );
-  }
+  );
   runLark([
     'sheets',
     '+styles-put',
@@ -452,7 +537,10 @@ function main() {
       styles: [{
         name: sheetName,
         cell_styles: bodyStyles,
-        row_sizes: dataEnd >= 103 ? [{ range: `103:${dataEnd}`, type: 'pixel', size: 78 }] : []
+        row_sizes: dataEnd > templateRows ? [{
+          range: `${templateRows + 1}:${dataEnd}`,
+          ...templateHeight
+        }] : []
       }]
     }),
     '--format',
@@ -463,32 +551,25 @@ function main() {
   runLark(['sheets', '+dropdown-delete', '--as', 'user', '--url', targetUrl, '--ranges', JSON.stringify([`${sheetName}!E2:F${dataEnd}`]), '--yes', '--format', 'json']);
   runLark(['sheets', '+cells-set', '--as', 'user', '--url', targetUrl, '--sheet-id', sheetId, '--range', 'C2', '--cells', '[[{"data_validation":{"type":"date"}}]]', '--copy-to-range', `C2:C${dataEnd}`, '--format', 'json']);
 
-  const url = sheetId
-    ? `https://yb7ao262ru.feishu.cn/wiki/${WIKI_NODE}?sheet=${sheetId}`
-    : targetUrl;
-
-  let written = data.length;
-  if (sheetId) {
-    const probe = runLark([
-      'sheets',
-      '+csv-get',
-      '--as',
-      'user',
-      '--url',
-      targetUrl,
-      '--sheet-id',
-      sheetId,
-      '--range',
-      `A1:A${data.length + 1}`,
-      '--format',
-      'json'
-    ]);
-    const csv = probe.data?.annotated_csv || '';
-    written = csv
-      .split(/\n/)
-      .map((line) => line.split(']', 2).pop() || '')
-      .filter((line, idx) => idx > 0 && line.replace(/,/g, '').trim()).length;
-  }
+  const url = `https://yb7ao262ru.feishu.cn/wiki/${WIKI_NODE}?sheet=${sheetId}`;
+  const probe = runLark([
+    'sheets',
+    '+csv-get',
+    '--as',
+    'user',
+    '--url',
+    targetUrl,
+    '--sheet-id',
+    sheetId,
+    '--range',
+    `A1:A${data.length + 1}`,
+    '--format',
+    'json'
+  ]);
+  const written = (probe.data?.annotated_csv || '')
+    .split(/\n/)
+    .map((line) => line.split(']', 2).pop() || '')
+    .filter((line, idx) => idx > 0 && line.replace(/,/g, '').trim()).length;
   if (written !== data.length) {
     throw new Error(`写入行数不符：expected=${data.length} actual=${written}`);
   }
