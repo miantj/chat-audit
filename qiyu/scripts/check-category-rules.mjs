@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { CATEGORY_RULES, resolveCategory, thirdCategory } from './lib/category-rules.mjs';
+import { CATEGORY_RULES, resolveCategory, thirdCategory, sanitizeAiCategory, AI_CATEGORY_WHITELIST } from './lib/category-rules.mjs';
 
 assert.equal(CATEGORY_RULES.length, 68);
 assert.equal(resolveCategory('', '售前/商品详情咨询/款式咨询').category, '款式咨询');
@@ -28,3 +28,7 @@ for (const [question, expected] of [
   assert.equal(resolveCategory(question, '原分类').category, expected, question);
 }
 console.log('category rules ok');
+
+assert.equal(AI_CATEGORY_WHITELIST.length, 61);
+assert.equal(sanitizeAiCategory('尺码咨询,韵达,错发反馈'), '尺码咨询,关于售前其他咨询');
+assert.equal(resolveCategory('', '售后/售后退款咨询/售后退款咨询').category, '关于售前其他咨询');

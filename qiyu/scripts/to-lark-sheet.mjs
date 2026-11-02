@@ -2,13 +2,14 @@
 /**
  * 售前登记 CSV → 飞书「2026售前登记」知识库表格
  * - 按下载日建/覆盖同名子表（如 2026-09-27）
- * - 仅 9 列：AI咨询分类/七鱼咨询分类/日期/会话结束时间/一手用户id/会话id/是否疑似c端/货号/用户问题
+ * - 12 列：原登记字段 + 没有疑似c端标签但是是c端/有疑似c端标签确认是c端/无法判断
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { REGISTER_HEADERS } from './to-register.mjs';
+import { REGISTER_HEADERS, CUSTOMER_CHECK_HEADERS } from './to-register.mjs';
+import { AI_CATEGORY_WHITELIST, sanitizeAiCategory } from './lib/category-rules.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -17,7 +18,6 @@ const DEFAULT_URL =
   'https://yb7ao262ru.feishu.cn/wiki/Y8niwzMiliLdyUkb21VcMVqHnMe?sheet=ej5BzF';
 const WIKI_NODE = 'Y8niwzMiliLdyUkb21VcMVqHnMe';
 const TEMPLATE_SHEET_ID = 'ej5BzF';
-const TEMPLATE_ROWS = 102;
 const OPTIONS_SHEET_NAME = 'Sheet2';
 
 function arg(name) {
@@ -164,7 +164,7 @@ function datetimeValue(value) {
   return match ? `${match[1]}T${match[2]}:00` : '';
 }
 
-function main() {
+export function main() {
   loadEnv();
   const inputArg = arg('--in');
   if (!inputArg) throw new Error('缺少 --in CSV 文件');
@@ -213,6 +213,33 @@ function main() {
     '--format',
     'json'
   ]);
+  const templateRows = info.data?.sheets?.find((sheet) => sheet.sheet_id === TEMPLATE_SHEET_ID)?.row_count;
+  if (!Number.isInteger(templateRows) || templateRows < 2) throw new Error('模板至少需要表头和一行正文样式');
+  const templateLayout = runLark([
+    'sheets', '+sheet-info', '--as', 'user', '--url', targetUrl,
+    '--sheet-id', TEMPLATE_SHEET_ID, '--range', `A${templateRows}:L${templateRows}`,
+    '--include', 'row_heights', '--format', 'json'
+  ]).data;
+  const templateCells = runLark([
+    'sheets', '+cells-get', '--as', 'user', '--url', targetUrl,
+    '--sheet-id', TEMPLATE_SHEET_ID, '--range', `A${templateRows}:L${templateRows}`,
+    '--include', 'style', '--format', 'json'
+  ]).data;
+  const templateRange = templateCells?.ranges?.[0];
+  if (templateCells?.has_more || templateRange?.truncated ||
+      templateRange?.actual_range !== `A${templateRows}:L${templateRows}` ||
+      templateRange?.row_indices?.[0] !== templateRows ||
+      templateRange?.col_indices?.join('') !== 'ABCDEFGHIJKL' ||
+      templateRange?.cells?.[0]?.length !== REGISTER_HEADERS.length) {
+    throw new Error('模板正文样式读取不完整，停止覆盖');
+  }
+  const templateHeight = templateLayout?.row_heights?.find(({ rows }) => {
+    const [start, end = start] = rows.split(':').map(Number);
+    return start <= templateRows && templateRows <= end;
+  });
+  if (!templateHeight || !Number.isFinite(templateHeight.height) || templateHeight.height <= 0) {
+    throw new Error('模板正文行高读取失败，停止覆盖');
+  }
   const optionsSheet = (info.data?.sheets || []).find((sheet) => sheet.sheet_name === OPTIONS_SHEET_NAME);
   if (!optionsSheet?.sheet_id) throw new Error(`未找到分类选项表：${OPTIONS_SHEET_NAME}`);
   const optionsOut = runLark([
@@ -233,31 +260,15 @@ function main() {
   const options = optionRows
     .map((line) => line.split(']', 2).pop()?.trim() || '')
     .filter(Boolean);
-  const categoryParts = data.map(([category]) => splitCategories(category, options));
-  const missingOptions = [...new Set(categoryParts.flat().filter((part) => !options.includes(part)))];
-  if (missingOptions.length) {
-    const lastOptionRow = optionRows.reduce((last, line) => {
-      const match = line.match(/^\[row=(\d+)\]/);
-      return match && line.split(']', 2).pop()?.trim() ? Number(match[1]) : last;
-    }, 0);
-    const startRow = lastOptionRow + 1;
-    runLark([
-      'sheets',
-      '+cells-set',
-      '--as',
-      'user',
-      '--url',
-      targetUrl,
-      '--sheet-id',
-      optionsSheet.sheet_id,
-      '--range',
-      `C${startRow}:C${startRow + missingOptions.length - 1}`,
-      '--cells',
-      JSON.stringify(missingOptions.map((value) => [{ value }])),
-      '--format',
-      'json'
-    ]);
-  }
+  // AI咨询分类以代码白名单为准；未知项收敛到「关于售前其他咨询」，不再自动追加污染 Sheet2。
+  if (!options.length) throw new Error('分类选项表 Sheet2!C 为空，请先恢复白名单');
+  const allowedOptions = AI_CATEGORY_WHITELIST;
+  const categoryParts = data.map(([category]) => {
+    const sanitized = sanitizeAiCategory(category);
+    const parts = splitCategories(sanitized, allowedOptions)
+      .map((part) => (allowedOptions.includes(part) ? part : '关于售前其他咨询'));
+    return [...new Set(parts.filter(Boolean))];
+  });
   const existing = (info.data?.sheets || []).find((s) => s.sheet_name === sheetName);
   if (existing?.sheet_id) {
     runLark([
@@ -305,7 +316,8 @@ function main() {
           是否疑似c端: 'object',
           // 多货号记录以单元格内换行保留；单货号按数字写入。
           货号: 'object',
-          用户问题: 'object'
+          用户问题: 'object',
+          ...Object.fromEntries(CUSTOMER_CHECK_HEADERS.map((name) => [name, 'object']))
         },
         formats: {
           日期: 'yyyy/MM/dd',
@@ -359,7 +371,7 @@ function main() {
 
   const dataEnd = data.length + 1;
   // sheet-copy 会带上模板样例行；table-put 只覆盖写入块，多出来的行要删掉，否则残留假数据。
-  if (dataEnd < TEMPLATE_ROWS) {
+  if (dataEnd < templateRows) {
     runLark([
       'sheets',
       '+dim-delete',
@@ -370,7 +382,7 @@ function main() {
       '--sheet-id',
       sheetId,
       '--range',
-      `${dataEnd + 1}:${TEMPLATE_ROWS}`,
+      `${dataEnd + 1}:${templateRows}`,
       '--yes',
       '--format',
       'json'
@@ -405,7 +417,7 @@ function main() {
     fs.rmSync(categoriesFile, { force: true });
   }
 
-  const formatEnd = Math.min(TEMPLATE_ROWS, dataEnd);
+  const formatEnd = Math.min(templateRows, dataEnd);
   runLark([
     'sheets',
     '+range-copy',
@@ -418,7 +430,7 @@ function main() {
     '--target-sheet-id',
     sheetId,
     '--source-range',
-    `A1:I${formatEnd}`,
+    `A1:L${formatEnd}`,
     '--target-range',
     `A1:I${formatEnd}`,
     '--paste-type',
@@ -426,20 +438,20 @@ function main() {
     '--format',
     'json'
   ]);
-  const bodyStyles = [
+  const bodyStyles = [];
+  if (dataEnd > templateRows) {
+    // 模板最后一行作为新增正文行的样式；现有模板行及列宽由 sheet-copy 保留。
+    bodyStyles.push(...templateRange.cells[0].map((cell, index) => ({
+      range: `${templateRange.col_indices[index]}${templateRows + 1}:${templateRange.col_indices[index]}${dataEnd}`,
+      ...cell.cell_styles
+    })));
+  }
+  bodyStyles.push(
     { range: `C2:C${dataEnd}`, number_format: 'yyyy/MM/dd' },
     { range: `D2:D${dataEnd}`, number_format: 'yyyy/MM/dd HH:mm' },
     { range: `E2:F${dataEnd}`, number_format: '0' },
     { range: `H2:H${dataEnd}`, number_format: '0' }
-  ];
-  if (dataEnd >= 103) {
-    bodyStyles.push(
-      { range: `A103:F${dataEnd}`, font_family: '微软雅黑', font_size: 13, font_color: 'rgb(0, 0, 0)', horizontal_alignment: 'center', vertical_alignment: 'middle' },
-      { range: `G103:G${dataEnd}`, font_family: '微软雅黑', font_size: 13, font_color: 'rgb(31, 35, 41)', horizontal_alignment: 'center', vertical_alignment: 'middle' },
-      { range: `H103:H${dataEnd}`, font_family: '微软雅黑', font_size: 13, font_color: 'rgb(0, 0, 0)', horizontal_alignment: 'center', vertical_alignment: 'middle' },
-      { range: `I103:I${dataEnd}`, font_family: '微软雅黑', font_size: 13, font_color: 'rgb(31, 35, 41)', horizontal_alignment: 'center', vertical_alignment: 'middle' }
-    );
-  }
+  );
   runLark([
     'sheets',
     '+styles-put',
@@ -452,7 +464,11 @@ function main() {
       styles: [{
         name: sheetName,
         cell_styles: bodyStyles,
-        row_sizes: dataEnd >= 103 ? [{ range: `103:${dataEnd}`, type: 'pixel', size: 78 }] : []
+        row_sizes: dataEnd > templateRows ? [{
+          range: `${templateRows + 1}:${dataEnd}`,
+          type: templateHeight.type === 'auto' ? 'auto' : 'pixel',
+          ...(templateHeight.type === 'auto' ? {} : { size: templateHeight.height })
+        }] : []
       }]
     }),
     '--format',

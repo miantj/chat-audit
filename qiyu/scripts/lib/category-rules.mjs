@@ -1159,6 +1159,21 @@ for (const rule of RAW_RULES) {
 
 export const CATEGORY_RULES = RAW_RULES;
 
+/** 飞书 AI咨询分类下拉的固定集合（文档「11. 分类」叶子展示名）；禁止把售后/路径碎片写入选项表。 */
+export const AI_CATEGORY_WHITELIST = [...new Set(CATEGORY_RULES.map((rule) => aiDisplayCategory(rule.name)))];
+const AI_CATEGORY_SET = new Set(AI_CATEGORY_WHITELIST);
+const AI_CATEGORY_FALLBACK = '关于售前其他咨询';
+
+/** 将未知/售后等分类收敛到白名单；空值保持为空。 */
+export function sanitizeAiCategory(category) {
+  const parts = String(category || '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!parts.length) return '';
+  return [...new Set(parts.map((part) => (AI_CATEGORY_SET.has(part) ? part : AI_CATEGORY_FALLBACK)))].join(',');
+}
+
 const FALLBACK_RULES = new Set([
   '关于售前其他咨询',
   '其他反馈',
@@ -1307,11 +1322,17 @@ function applyPrecedence(scores, text) {
  * @returns { category: string, source: 'doc'|'qiyu' }
  */
 export function resolveCategory(userQuestion, qiyuCategory) {
-  if (!String(userQuestion || '').trim()) return { category: thirdCategory(qiyuCategory), source: 'qiyu' };
+  if (!String(userQuestion || '').trim()) {
+    return { category: sanitizeAiCategory(thirdCategory(qiyuCategory)), source: 'qiyu' };
+  }
   const hits = applyPrecedence(scoreCategories(userQuestion).filter((item) => item.score > 0), userQuestion);
-  if (!hits.length) return { category: thirdCategory(qiyuCategory), source: 'qiyu' };
+  if (!hits.length) {
+    return { category: sanitizeAiCategory(thirdCategory(qiyuCategory)), source: 'qiyu' };
+  }
   return {
-    category: [...new Set(hits.map((item) => aiDisplayCategory(item.name)))].join(','),
+    category: sanitizeAiCategory(
+      [...new Set(hits.map((item) => aiDisplayCategory(item.name)))].join(',')
+    ),
     source: 'doc'
   };
 }
