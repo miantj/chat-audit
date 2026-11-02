@@ -80,8 +80,8 @@ test('权限或参数错误立即报错，不重试', (t) => {
   assert.equal(wait.mock.callCount(), 0);
 });
 
-for (const template of [{ rows: 3, type: 'custom', height: 160 }, { rows: 102, type: 'custom', height: 78 }, { rows: 2, type: 'auto', height: 27 }]) {
-test(`飞书按十二列写入并沿用 ${template.rows} 行模板样式及行高`, () => {
+for (const templateRows of [3, 102, 2]) {
+test(`飞书按十二列写入并固定 78px 行高（模板 ${templateRows} 行）`, () => {
   const csv = [REGISTER_HEADERS.join(','), ...[
     ['是', '', ''], ['', '是', ''], ['', '', '是']
   ].map((checks, i) => ['面料成分咨询', '面料成分咨询', '2026-10-22', '2026-10-22 13:00', '1', String(100 + i), '否', '123456', '什么面料', ...checks].join(','))].join('\n');
@@ -100,13 +100,10 @@ test(`飞书按十二列写入并沿用 ${template.rows} 行模板样式及行�
     commands.push(args);
     let data = {};
     if (args[1] === '+workbook-info') {
-      data = { sheets: [{ sheet_name: 'Sheet2', sheet_id: 'options' }, { sheet_name: '模板', sheet_id: 'ej5BzF', row_count: template.rows }, { sheet_name: '2026-10-22', sheet_id: workbooks++ ? 'new-sheet' : 'old-sheet' }] };
-    }
-    if (args[1] === '+sheet-info') {
-      data = { row_heights: [{ rows: `${template.rows}:${template.rows}`, type: template.type, height: template.height }] };
+      data = { sheets: [{ sheet_name: 'Sheet2', sheet_id: 'options' }, { sheet_name: '模板', sheet_id: 'ej5BzF', row_count: templateRows }, { sheet_name: '2026-10-22', sheet_id: workbooks++ ? 'new-sheet' : 'old-sheet' }] };
     }
     if (args[1] === '+cells-get') {
-      data = { has_more: false, ranges: [{ actual_range: `A${template.rows}:L${template.rows}`, row_indices: [template.rows], col_indices: [...'ABCDEFGHIJKL'], cells: [REGISTER_HEADERS.map((_, index) => ({ cell_styles: { font_size: index < 9 ? 10 : 13, horizontal_alignment: 'center' } }))] }] };
+      data = { has_more: false, ranges: [{ actual_range: 'A2:L2', row_indices: [2], col_indices: [...'ABCDEFGHIJKL'], cells: [REGISTER_HEADERS.map((_, index) => ({ cell_styles: { font_size: index < 9 ? 10 : 13, horizontal_alignment: 'center' } }))] }] };
     }
     if (args[1] === '+csv-get') {
       data = { annotated_csv: args.includes('C1:C200') ? '[row=1]面料成分咨询\n[row=2]关于售前其他咨询' : '[row=1]AI咨询分类\n[row=2]面料成分咨询\n[row=3]面料成分咨询\n[row=4]面料成分咨询' };
@@ -123,22 +120,22 @@ test(`飞书按十二列写入并沿用 ${template.rows} 行模板样式及行�
     assert.deepEqual(table.data.map((row) => row.slice(-3)), [['是', '', ''], ['', '是', ''], ['', '', '是']]);
     for (const name of CUSTOMER_CHECK_HEADERS) assert.equal(table.dtypes[name], 'object');
     const copy = commands.find((args) => args[1] === '+range-copy');
-    assert.equal(copy[copy.indexOf('--source-range') + 1], `A1:L${Math.min(template.rows, 4)}`);
+    const formatEnd = Math.min(templateRows, 4);
+    assert.equal(copy[copy.indexOf('--source-range') + 1], `A1:L${formatEnd}`);
+    assert.equal(copy[copy.indexOf('--target-range') + 1], `A1:L${formatEnd}`);
     const styleArgs = commands.find((args) => args[1] === '+styles-put');
     const styles = JSON.parse(styleArgs[styleArgs.indexOf('--styles') + 1]).styles[0];
     assert.equal(styles.col_sizes, undefined, '列宽应由 sheet-copy 保留，不再硬编码');
-    if (template.rows < 4) {
-      assert.ok(styles.cell_styles.some((style) => style.range === `A${template.rows + 1}:A4` && style.font_size === 10));
-      assert.ok(styles.cell_styles.some((style) => style.range === `L${template.rows + 1}:L4` && style.font_size === 13));
-      assert.deepEqual(styles.row_sizes, [{ range: `${template.rows + 1}:4`, type: template.type === 'auto' ? 'auto' : 'pixel', ...(template.type === 'auto' ? {} : { size: template.height }) }]);
+    assert.deepEqual(styles.row_sizes, [{ range: '2:4', type: 'pixel', size: 78 }]);
+    if (templateRows < 4) {
+      assert.ok(styles.cell_styles.some((style) => style.range === `A${templateRows + 1}:A4` && style.font_size === 10));
+      assert.ok(styles.cell_styles.some((style) => style.range === `L${templateRows + 1}:L4` && style.font_size === 13));
     } else {
-      assert.deepEqual(styles.row_sizes, []);
       const trim = commands.find((args) => args[1] === '+dim-delete');
       assert.equal(trim[trim.indexOf('--range') + 1], '5:102');
     }
-    for (const command of ['+sheet-info', '+cells-get']) {
-      assert.ok(commands.findIndex((args) => args[1] === command) < commands.findIndex((args) => args[1] === '+sheet-delete'), '模板应在删除旧子表前读取');
-    }
+    assert.ok(commands.findIndex((args) => args[1] === '+cells-get') < commands.findIndex((args) => args[1] === '+sheet-delete'), '模板应在删除旧子表前读取');
+    assert.equal(commands.some((args) => args[1] === '+sheet-info'), false, '行高固定 78，不再读模板末行高');
   } finally {
     process.argv = originalArgv;
   }
@@ -193,11 +190,8 @@ test('飞书按十二列写入三种勾选结果，并为新增 J:L 列设置样
     if (args[1] === '+workbook-info') {
       data = { sheets: [{ sheet_name: 'Sheet2', sheet_id: 'options' }, { sheet_name: '模板', sheet_id: 'ej5BzF', row_count: 102 }, ...(workbooks++ ? [{ sheet_name: '2026-10-22', sheet_id: 'new-sheet' }] : [])] };
     }
-    if (args[1] === '+sheet-info') {
-      data = { row_heights: [{ rows: '102:102', type: 'pixel', height: 40 }] };
-    }
     if (args[1] === '+cells-get') {
-      data = { has_more: false, ranges: [{ actual_range: 'A102:L102', row_indices: [102], col_indices: [...'ABCDEFGHIJKL'], cells: [REGISTER_HEADERS.map((_, index) => ({ cell_styles: { font_size: index < 9 ? 10 : 13, horizontal_alignment: 'center' } }))] }] };
+      data = { has_more: false, ranges: [{ actual_range: 'A2:L2', row_indices: [2], col_indices: [...'ABCDEFGHIJKL'], cells: [REGISTER_HEADERS.map((_, index) => ({ cell_styles: { font_size: index < 9 ? 10 : 13, horizontal_alignment: 'center' } }))] }] };
     }
     if (args[1] === '+csv-get') {
       data = { annotated_csv: args.includes('C1:C200') ? '[row=1]面料成分咨询\n[row=2]关于售前其他咨询' : '[row=1]AI咨询分类\n[row=2]面料成分咨询\n[row=3]面料成分咨询\n[row=4]面料成分咨询' };
@@ -213,8 +207,13 @@ test('飞书按十二列写入三种勾选结果，并为新增 J:L 列设置样
     assert.deepEqual(table.columns.slice(-3), CUSTOMER_CHECK_HEADERS);
     assert.deepEqual(table.data.map((row) => row.slice(-3)), [['是', '', ''], ['', '是', ''], ['', '', '是']]);
     for (const name of CUSTOMER_CHECK_HEADERS) assert.equal(table.dtypes[name], 'object');
+    const copy = commands.find((args) => args[1] === '+range-copy');
+    assert.equal(copy[copy.indexOf('--source-range') + 1], 'A1:L4');
+    assert.equal(copy[copy.indexOf('--target-range') + 1], 'A1:L4');
     const styleArgs = commands.find((args) => args[1] === '+styles-put');
     assert.ok(styleArgs, '应写入样式');
+    const styles = JSON.parse(styleArgs[styleArgs.indexOf('--styles') + 1]).styles[0];
+    assert.deepEqual(styles.row_sizes, [{ range: '2:4', type: 'pixel', size: 78 }]);
     const dim = commands.find((args) => args[1] === '+dim-delete');
     assert.equal(dim[dim.indexOf('--range') + 1], '5:102');
   } finally {

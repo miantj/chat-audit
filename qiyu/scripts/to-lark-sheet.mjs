@@ -18,6 +18,10 @@ const DEFAULT_URL =
   'https://yb7ao262ru.feishu.cn/wiki/Y8niwzMiliLdyUkb21VcMVqHnMe?sheet=ej5BzF';
 const WIKI_NODE = 'Y8niwzMiliLdyUkb21VcMVqHnMe';
 const TEMPLATE_SHEET_ID = 'ej5BzF';
+/** 正文样例行：读样式用；勿用 row_count 末行（多为空白矮网格）。 */
+const TEMPLATE_SAMPLE_ROW = 2;
+/** 与旧硬编码一致；模板样例行常为 auto/27，不能当正文行高。 */
+const BODY_ROW_HEIGHT_PX = 78;
 const OPTIONS_SHEET_NAME = 'Sheet2';
 
 function arg(name) {
@@ -214,31 +218,22 @@ export function main() {
     'json'
   ]);
   const templateRows = info.data?.sheets?.find((sheet) => sheet.sheet_id === TEMPLATE_SHEET_ID)?.row_count;
-  if (!Number.isInteger(templateRows) || templateRows < 2) throw new Error('模板至少需要表头和一行正文样式');
-  const templateLayout = runLark([
-    'sheets', '+sheet-info', '--as', 'user', '--url', targetUrl,
-    '--sheet-id', TEMPLATE_SHEET_ID, '--range', `A${templateRows}:L${templateRows}`,
-    '--include', 'row_heights', '--format', 'json'
-  ]).data;
+  if (!Number.isInteger(templateRows) || templateRows < TEMPLATE_SAMPLE_ROW) {
+    throw new Error('模板至少需要表头和一行正文样式');
+  }
+  // 样式取正文样例行（第 2 行），不用空白网格末行。
   const templateCells = runLark([
     'sheets', '+cells-get', '--as', 'user', '--url', targetUrl,
-    '--sheet-id', TEMPLATE_SHEET_ID, '--range', `A${templateRows}:L${templateRows}`,
+    '--sheet-id', TEMPLATE_SHEET_ID, '--range', `A${TEMPLATE_SAMPLE_ROW}:L${TEMPLATE_SAMPLE_ROW}`,
     '--include', 'style', '--format', 'json'
   ]).data;
   const templateRange = templateCells?.ranges?.[0];
   if (templateCells?.has_more || templateRange?.truncated ||
-      templateRange?.actual_range !== `A${templateRows}:L${templateRows}` ||
-      templateRange?.row_indices?.[0] !== templateRows ||
+      templateRange?.actual_range !== `A${TEMPLATE_SAMPLE_ROW}:L${TEMPLATE_SAMPLE_ROW}` ||
+      templateRange?.row_indices?.[0] !== TEMPLATE_SAMPLE_ROW ||
       templateRange?.col_indices?.join('') !== 'ABCDEFGHIJKL' ||
       templateRange?.cells?.[0]?.length !== REGISTER_HEADERS.length) {
     throw new Error('模板正文样式读取不完整，停止覆盖');
-  }
-  const templateHeight = templateLayout?.row_heights?.find(({ rows }) => {
-    const [start, end = start] = rows.split(':').map(Number);
-    return start <= templateRows && templateRows <= end;
-  });
-  if (!templateHeight || !Number.isFinite(templateHeight.height) || templateHeight.height <= 0) {
-    throw new Error('模板正文行高读取失败，停止覆盖');
   }
   const optionsSheet = (info.data?.sheets || []).find((sheet) => sheet.sheet_name === OPTIONS_SHEET_NAME);
   if (!optionsSheet?.sheet_id) throw new Error(`未找到分类选项表：${OPTIONS_SHEET_NAME}`);
@@ -418,6 +413,7 @@ export function main() {
   }
 
   const formatEnd = Math.min(templateRows, dataEnd);
+  // 12 列格式必须 A:L → A:L；贴到 A:I 会错位 J:L 与行样式。
   runLark([
     'sheets',
     '+range-copy',
@@ -432,7 +428,7 @@ export function main() {
     '--source-range',
     `A1:L${formatEnd}`,
     '--target-range',
-    `A1:I${formatEnd}`,
+    `A1:L${formatEnd}`,
     '--paste-type',
     'formats',
     '--format',
@@ -440,7 +436,7 @@ export function main() {
   ]);
   const bodyStyles = [];
   if (dataEnd > templateRows) {
-    // 模板最后一行作为新增正文行的样式；现有模板行及列宽由 sheet-copy 保留。
+    // 超出模板的正文行：沿用样例行（第 2 行）字体/对齐；列宽仍靠 sheet-copy。
     bodyStyles.push(...templateRange.cells[0].map((cell, index) => ({
       range: `${templateRange.col_indices[index]}${templateRows + 1}:${templateRange.col_indices[index]}${dataEnd}`,
       ...cell.cell_styles
@@ -464,11 +460,8 @@ export function main() {
       styles: [{
         name: sheetName,
         cell_styles: bodyStyles,
-        row_sizes: dataEnd > templateRows ? [{
-          range: `${templateRows + 1}:${dataEnd}`,
-          type: templateHeight.type === 'auto' ? 'auto' : 'pixel',
-          ...(templateHeight.type === 'auto' ? {} : { size: templateHeight.height })
-        }] : []
+        // 全文正文统一 78px，避免模板末行矮高/default 导致「行间隔太短」。
+        row_sizes: [{ range: `2:${dataEnd}`, type: 'pixel', size: BODY_ROW_HEIGHT_PX }]
       }]
     }),
     '--format',
