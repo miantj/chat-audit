@@ -2,7 +2,7 @@
 # 安装 / 卸载本地补跑 HTTP 服务（launchd KeepAlive，与 daily-update 定时任务独立）
 #   ./scripts/install-rerun-server.sh          # 安装并启用
 #   ./scripts/install-rerun-server.sh uninstall
-# 默认监听 http://127.0.0.1:18765
+# 默认监听 http://0.0.0.0:18765（局域网可访问，如 http://192.168.4.213:18765）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -59,6 +59,8 @@ install() {
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/Users/mingmacmini/.npm-global/bin:/usr/bin:/bin</string>
+    <key>QIYU_RERUN_HOST</key>
+    <string>0.0.0.0</string>
     <key>QIYU_RERUN_PORT</key>
     <string>18765</string>
     <key>QIYU_RERUN_COOLDOWN_MS</key>
@@ -76,9 +78,11 @@ PLIST
 
   echo "已安装 ${LABEL}"
   echo "  plist: $PLIST"
-  echo "  监听: http://127.0.0.1:18765"
-  echo "  触发: curl 'http://127.0.0.1:18765/qiyu/rerun?day=2026-11-02'"
-  echo "  状态: curl 'http://127.0.0.1:18765/qiyu/status'"
+  echo "  监听: http://0.0.0.0:18765（局域网）"
+  echo "  本机: curl 'http://127.0.0.1:18765/qiyu/status'"
+  echo "  局域网: curl 'http://192.168.4.213:18765/qiyu/rerun?day=2026-11-02'"
+  echo "  状态: curl 'http://192.168.4.213:18765/qiyu/status'"
+  echo "  提示: 若浏览器打不开，检查 macOS 防火墙是否放行 node/18765"
   echo "  日志: $ROOT/logs/rerun-server.*.log"
   echo "  卸载: $0 uninstall"
 }

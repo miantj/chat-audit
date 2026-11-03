@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 本地补跑 HTTP 服务（仅 127.0.0.1）
+ * 局域网补跑 HTTP 服务（默认监听 0.0.0.0，内网可用）
  *
  *   GET /qiyu/rerun?day=YYYY-MM-DD          触发补跑（默认昨天）
  *   GET /qiyu/rerun?day=YYYY-MM-DD&force=1  强制重导七鱼
@@ -9,12 +9,14 @@
  *   GET /health                            探活
  *
  * 环境变量：
+ *   QIYU_RERUN_HOST          默认 0.0.0.0（局域网可访问；改 127.0.0.1 仅本机）
  *   QIYU_RERUN_PORT          默认 18765
  *   QIYU_RERUN_COOLDOWN_MS   默认 300000（5 分钟，距上次成功启动）
  *   QIYU_REGISTER_MAX_RETRY  传给 manual-rerun（额外重试次数）
  *
  * 启动：node scripts/rerun-server.mjs
  * 安装常驻：./scripts/install-rerun-server.sh
+ * 示例：http://192.168.4.213:18765/qiyu/rerun?day=2026-11-02
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -27,7 +29,7 @@ const LOG_DIR = path.join(ROOT, 'logs');
 const STATE_PATH = path.join(LOG_DIR, 'rerun-server-state.json');
 const PORT = Number.parseInt(process.env.QIYU_RERUN_PORT || '18765', 10) || 18765;
 const COOLDOWN_MS = Number.parseInt(process.env.QIYU_RERUN_COOLDOWN_MS || '300000', 10) || 300_000;
-const HOST = '127.0.0.1';
+const HOST = process.env.QIYU_RERUN_HOST || '0.0.0.0';
 
 fs.mkdirSync(LOG_DIR, { recursive: true });
 
@@ -265,7 +267,8 @@ function startJob({ day, forceDownload, dryRun = false }) {
 }
 
 function handle(req, res) {
-  const url = new URL(req.url || '/', `http://${HOST}:${PORT}`);
+  const baseHost = (req.headers.host || `127.0.0.1:${PORT}`).split(',')[0].trim();
+  const url = new URL(req.url || '/', `http://${baseHost}`);
   const { pathname, searchParams } = url;
 
   if (req.method !== 'GET') {
@@ -322,6 +325,7 @@ server.listen(PORT, HOST, () => {
   console.error(
     `qiyu rerun server listening http://${HOST}:${PORT}  (cooldown=${COOLDOWN_MS}ms)`
   );
-  console.error(`  GET http://${HOST}:${PORT}/qiyu/rerun?day=${shanghaiYmd(-1)}`);
-  console.error(`  GET http://${HOST}:${PORT}/qiyu/status`);
+  console.error(`  GET http://127.0.0.1:${PORT}/qiyu/rerun?day=${shanghaiYmd(-1)}`);
+  console.error(`  GET http://192.168.4.213:${PORT}/qiyu/rerun?day=${shanghaiYmd(-1)}  (LAN)`);
+  console.error(`  GET http://127.0.0.1:${PORT}/qiyu/status`);
 });
