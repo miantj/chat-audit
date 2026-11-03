@@ -4,6 +4,7 @@
  *
  *   GET /qiyu/rerun?day=YYYY-MM-DD          触发补跑（默认昨天）
  *   GET /qiyu/rerun?day=YYYY-MM-DD&force=1  强制重导七鱼
+ *     · 若已有任务在跑：HTTP 409，accepted:false + busy，body 等同 /qiyu/status
  *   GET /qiyu/status                        当前/上次状态
  *   GET /health                            探活
  *
@@ -160,13 +161,16 @@ function parseLogSummary(logPath) {
 
 function startJob({ day, forceDownload, dryRun = false }) {
   if (child || state.status === 'running') {
+    // 有任务在跑时不另起任务，直接把当前 status 一并返回（等同 /qiyu/status）
     return {
       accepted: false,
       reason: 'busy',
       httpStatus: 409,
       body: publicState({
         accepted: false,
-        message: '已有补跑任务进行中，请先查 /qiyu/status'
+        busy: true,
+        reason: 'busy',
+        message: '已有补跑任务进行中，以下为当前 status（等同 GET /qiyu/status）'
       })
     };
   }

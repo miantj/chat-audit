@@ -80,7 +80,7 @@ curl -s 'http://127.0.0.1:18765/health'
 ./scripts/install-rerun-server.sh uninstall
 ```
 
-- 成功**启动**后 5 分钟内再次触发会 429，并返回还需等待秒数；任务 `running` 时不会开第二份  
+- 成功**启动**后 5 分钟内再次触发会 429，并返回还需等待秒数；任务 `running` 时再点 `/qiyu/rerun` 会 **409 + 当前 status**（等同 `/qiyu/status`，`accepted:false` / `busy:true`），不另起任务  
 - 优先复用按日 xlsx → AI 重试登记 → 写飞书；`&force=1` 强制重导  
 - 状态落盘：`logs/rerun-server-state.json`
 ## 浏览器控制（CDP）
