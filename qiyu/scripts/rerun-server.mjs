@@ -2,10 +2,10 @@
 /**
  * 局域网补跑 HTTP 服务（默认监听 0.0.0.0，内网可用）
  *
- *   GET /qiyu/rerun?day=YYYY-MM-DD          触发补跑（默认昨天）
+ *   GET /qiyu/rerun                          触发补跑（不传 day → 当天 Asia/Shanghai）
+ *   GET /qiyu/rerun?day=YYYY-MM-DD          触发补跑指定日
  *   GET /qiyu/rerun?day=YYYY-MM-DD&force=1  强制重导七鱼
- *     · 若已有任务在跑：HTTP 409，accepted:false + busy，body 等同 /qiyu/status
- *   GET /qiyu/status                        当前/上次状态
+ *     · 忙/限频：HTTP 409/429，body 含当前 job 状态（无独立 /status）
  *   GET /health                            探活
  *
  * 环境变量：
@@ -16,7 +16,8 @@
  *
  * 启动：node scripts/rerun-server.mjs
  * 安装常驻：./scripts/install-rerun-server.sh
- * 示例：http://192.168.4.213:18765/qiyu/rerun?day=2026-11-02
+ * 示例：http://192.168.4.213:18765/qiyu/rerun
+ *       http://192.168.4.213:18765/qiyu/rerun?day=2026-11-02
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -163,7 +164,7 @@ function parseLogSummary(logPath) {
 
 function startJob({ day, forceDownload, dryRun = false }) {
   if (child || state.status === 'running') {
-    // 有任务在跑时不另起任务，直接把当前 status 一并返回（等同 /qiyu/status）
+    // 有任务在跑时不另起任务，直接把当前 status 一并返回
     return {
       accepted: false,
       reason: 'busy',
@@ -172,7 +173,7 @@ function startJob({ day, forceDownload, dryRun = false }) {
         accepted: false,
         busy: true,
         reason: 'busy',
-        message: '已有补跑任务进行中，以下为当前 status（等同 GET /qiyu/status）'
+        message: '已有补跑任务进行中，以下为当前 status'
       })
     };
   }
@@ -281,13 +282,9 @@ function handle(req, res) {
     return;
   }
 
-  if (pathname === '/qiyu/status' || pathname === '/status') {
-    sendJson(res, 200, publicState());
-    return;
-  }
-
   if (pathname === '/qiyu/rerun' || pathname === '/rerun') {
-    const day = searchParams.get('day') || shanghaiYmd(-1);
+    // 不传 day → Asia/Shanghai 当天日历日
+    const day = searchParams.get('day') || shanghaiYmd(0);
     if (!validDay(day)) {
       sendJson(res, 400, {
         ok: false,
@@ -309,7 +306,7 @@ function handle(req, res) {
 
   sendJson(res, 404, {
     ok: false,
-    message: '未知路径。可用: GET /qiyu/rerun?day=YYYY-MM-DD 、GET /qiyu/status 、GET /health'
+    message: '未知路径。可用: GET /qiyu/rerun 、GET /qiyu/rerun?day=YYYY-MM-DD 、GET /health'
   });
 }
 
@@ -325,7 +322,8 @@ server.listen(PORT, HOST, () => {
   console.error(
     `qiyu rerun server listening http://${HOST}:${PORT}  (cooldown=${COOLDOWN_MS}ms)`
   );
-  console.error(`  GET http://127.0.0.1:${PORT}/qiyu/rerun?day=${shanghaiYmd(-1)}`);
-  console.error(`  GET http://192.168.4.213:${PORT}/qiyu/rerun?day=${shanghaiYmd(-1)}  (LAN)`);
-  console.error(`  GET http://127.0.0.1:${PORT}/qiyu/status`);
+  console.error(`  GET http://127.0.0.1:${PORT}/qiyu/rerun  (默认当天 ${shanghaiYmd(0)})`);
+  console.error(`  GET http://192.168.4.213:${PORT}/qiyu/rerun  (LAN，默认当天)`);
+  console.error(`  GET http://127.0.0.1:${PORT}/qiyu/rerun?day=YYYY-MM-DD`);
+  console.error(`  GET http://127.0.0.1:${PORT}/health`);
 });

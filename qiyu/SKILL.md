@@ -66,21 +66,24 @@ cd qiyu
 - 定时仍失败时用 `manual-rerun.sh` 或下方 HTTP 补跑，不必整段重导  
 日志在 `qiyu/logs/daily-update-YYYY-MM-DD.log` / `manual-rerun-*.log`。
 
-### HTTP 手动触发（本机 127.0.0.1:18765）
+### HTTP 手动触发（局域网 0.0.0.0:18765）
 
-与 0/13/16/18 点 `daily-update` LaunchAgent **独立**；KeepAlive 常驻：
+与 0/13/16/18 点 `daily-update` LaunchAgent **独立**；KeepAlive 常驻。浏览器可直接打开：
+
+`http://192.168.4.213:18765/qiyu/rerun`（不传 `day` → **当天** Asia/Shanghai）  
+`http://192.168.4.213:18765/qiyu/rerun?day=2026-11-02`
 
 ```bash
 cd qiyu
 ./scripts/install-rerun-server.sh          # 安装并启用
 # 或前台：node scripts/rerun-server.mjs
-curl -s 'http://127.0.0.1:18765/qiyu/rerun?day=2026-11-02'   # 触发（默认昨天可省略 day）
-curl -s 'http://127.0.0.1:18765/qiyu/status'                 # 查状态
+curl -s 'http://192.168.4.213:18765/qiyu/rerun'                   # 触发当天（Asia/Shanghai）
+curl -s 'http://192.168.4.213:18765/qiyu/rerun?day=2026-11-02'   # 指定日
 curl -s 'http://127.0.0.1:18765/health'
 ./scripts/install-rerun-server.sh uninstall
 ```
 
-- 成功**启动**后 5 分钟内再次触发会 429，并返回还需等待秒数；任务 `running` 时再点 `/qiyu/rerun` 会 **409 + 当前 status**（等同 `/qiyu/status`，`accepted:false` / `busy:true`），不另起任务  
+- 成功**启动**后 5 分钟内再次触发会 **429**（含当前 job / 还需等待秒数）；任务 `running` 时再点 `/qiyu/rerun` 会 **409 + 当前 status**（`accepted:false` / `busy:true`），不另起任务；无独立 `/qiyu/status`  
 - 优先复用按日 xlsx → AI 重试登记 → 写飞书；`&force=1` 强制重导  
 - 状态落盘：`logs/rerun-server-state.json`
 ## 浏览器控制（CDP）
