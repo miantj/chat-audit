@@ -409,6 +409,35 @@ async function downloadTask(start, end) {
   throw new Error('多次重试后仍无法发起导出（会话或 8003）');
 }
 
+function registerMaxAttempts() {
+  const n = Number.parseInt(process.env.QIYU_REGISTER_MAX_RETRY || '2', 10);
+  // 额外重试次数，默认 2 → 共 3 次；至少 0
+  return Number.isFinite(n) && n >= 0 ? n + 1 : 3;
+}
+
+function runToRegisterWithRetry(xlsxPath, registerFile) {
+  const attempts = registerMaxAttempts();
+  let lastErr = '';
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    console.error(`to-register attempt ${attempt}/${attempts} …`);
+    const register = spawnSync(
+      process.execPath,
+      [path.join(ROOT, 'scripts', 'to-register.mjs'), '--in', xlsxPath, '--out', registerFile],
+      { encoding: 'utf8' }
+    );
+    if (register.status === 0) return register;
+    lastErr = (register.stderr || register.stdout || '未知错误').trim();
+    console.error(`to-register failed attempt=${attempt}: ${lastErr}`);
+    // 仅对可重试类（AI 完整性 / 批量判断）继续；缺配置等也最多打满 attempts
+    if (attempt < attempts) {
+      const waitSec = 15 * attempt;
+      console.error(`等待 ${waitSec}s 后重试 AI 登记…`);
+      spawnSync('sleep', [String(waitSec)]);
+    }
+  }
+  throw new Error(`售前登记摘录生成失败：${lastErr}`);
+}
+
 async function runRange(startYmd, endYmd) {
   const { start, end } = dayRange(startYmd, endYmd);
   const dateLabel = startYmd === endYmd ? startYmd : `${startYmd}至${endYmd}`;
@@ -418,15 +447,11 @@ async function runRange(startYmd, endYmd) {
   const filename = rawName.toLowerCase().endsWith('.xlsx') ? rawName : `${rawName}.xlsx`;
   const dest = path.join(OUT, filename);
   await downloadUrl(task.url, dest);
+  // 稳定按日副本：定时失败后手动补跑可直接复用，不必再导出
+  const dayCopy = path.join(OUT, `历史会话按日-${dateLabel}.xlsx`);
+  fs.copyFileSync(dest, dayCopy);
   const registerFile = path.join(OUT, `售前登记摘录-${dateLabel}.csv`);
-  const register = spawnSync(
-    process.execPath,
-    [path.join(ROOT, 'scripts', 'to-register.mjs'), '--in', dest, '--out', registerFile],
-    { encoding: 'utf8' }
-  );
-  if (register.status !== 0) {
-    throw new Error(`售前登记摘录生成失败：${register.stderr || register.stdout || '未知错误'}`);
-  }
+  const register = runToRegisterWithRetry(dayCopy, registerFile);
   const uploadArgs = [
     path.join(ROOT, 'scripts', 'to-lark-sheet.mjs'),
     '--in',
@@ -442,6 +467,7 @@ async function runRange(startYmd, endYmd) {
     ok: true,
     id: task.id,
     file: dest,
+    dayCopy,
     size: fs.statSync(dest).size,
     register: registerFile,
     registerResult: JSON.parse(register.stdout),

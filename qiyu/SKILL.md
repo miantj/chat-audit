@@ -21,7 +21,7 @@ node scripts/to-register.mjs
 - C端且有标签：仅「有疑似c端标签确认是c端」填「是」。
 - 无法判定：仅「无法判断」填「是」。三列每行恰好一项为「是」，不允许全空或多选。
 - 标签未知（无有效用户 ID 或查无用户）不当作无标签；若 AI 判 C端，仅「无法判断」填「是」，并在执行摘要的 `cWithUnknownTag` 计数，等待核实。
-- 模型请求最多等待 10 分钟；失败、截断、漏项、重复/异常会话 ID 或非法判定立即停止，不覆盖原 CSV，不继续写飞书；不自动拆批、截断输入或重试。
+- 模型请求最多等待 10 分钟；失败、截断、漏项、重复/异常会话 ID 或非法判定立即停止，不覆盖原 CSV，不继续写飞书；单次请求不拆批、不截断输入。编排层（download / manual-rerun）会对「AI 批量判断失败」自动重试 2–3 次。
 
 **AI咨询分类**：优先文档「11. 分类」关键词（可多选逗号拼接）；无法判断/问题太短/无关键词 → 七鱼路径的三级分类。
 **七鱼咨询分类**：只展示七鱼导出路径的第三级；四级及以上截断到三级，缺少三级的路径留空。多个货号在同一单元格内换行，用户问题也在同一单元格内换行。
@@ -53,12 +53,36 @@ node scripts/download.mjs         # 默认昨天；可 --start/--end YYYY-MM-DD
 cd qiyu
 ./scripts/install-daily-update.sh          # 安装并启用
 ./scripts/daily-update.sh                  # 立刻试跑（默认今日）
+./scripts/daily-update.sh 2026-11-02       # 指定日期全量重跑
+./scripts/manual-rerun.sh                  # 手动补跑（默认昨天；优先复用按日 xlsx）
+./scripts/manual-rerun.sh 2026-11-02       # 补跑指定日
+./scripts/manual-rerun.sh 2026-11-02 --force-download
 ./scripts/install-daily-update.sh uninstall
 ```
 
 - 13:00、16:00、18:00：拉**当天**数据，同名飞书子表覆盖  
 - 00:00（24 点）：拉**刚结束的那天**（收口）  
-日志在 `qiyu/logs/daily-update-YYYY-MM-DD.log`。
+- 导出成功后会落 `exports/历史会话按日-YYYY-MM-DD.xlsx`；`to-register` AI 完整性失败时自动重试（默认共 3 次，可用 `QIYU_REGISTER_MAX_RETRY` 调额外次数）  
+- 定时仍失败时用 `manual-rerun.sh` 或下方 HTTP 补跑，不必整段重导  
+日志在 `qiyu/logs/daily-update-YYYY-MM-DD.log` / `manual-rerun-*.log`。
+
+### HTTP 手动触发（本机 127.0.0.1:18765）
+
+与 0/13/16/18 点 `daily-update` LaunchAgent **独立**；KeepAlive 常驻：
+
+```bash
+cd qiyu
+./scripts/install-rerun-server.sh          # 安装并启用
+# 或前台：node scripts/rerun-server.mjs
+curl -s 'http://127.0.0.1:18765/qiyu/rerun?day=2026-11-02'   # 触发（默认昨天可省略 day）
+curl -s 'http://127.0.0.1:18765/qiyu/status'                 # 查状态
+curl -s 'http://127.0.0.1:18765/health'
+./scripts/install-rerun-server.sh uninstall
+```
+
+- 成功**启动**后 5 分钟内再次触发会 429，并返回还需等待秒数；任务 `running` 时不会开第二份  
+- 优先复用按日 xlsx → AI 重试登记 → 写飞书；`&force=1` 强制重导  
+- 状态落盘：`logs/rerun-server-state.json`
 ## 浏览器控制（CDP）
 
 专用 Chrome：`~/.chrome-qiyu-profile`，调试口 **9333**。

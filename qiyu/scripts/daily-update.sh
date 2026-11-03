@@ -2,6 +2,8 @@
 # 拉取当日七鱼会话 → 售前登记 CSV → 飞书表格
 # launchd：每天 13:00 / 16:00 / 18:00 / 00:00（24 点）；也可手动：./scripts/daily-update.sh
 # 手动可指定：./scripts/daily-update.sh 2026-09-28
+# AI 完整性失败时 download.mjs 内会对 to-register 自动重试（默认共 3 次）
+# 失败后补跑优先：./scripts/manual-rerun.sh [YYYY-MM-DD]（可复用按日 xlsx）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
