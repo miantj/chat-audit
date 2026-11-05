@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 手动补跑售前登记（AI 完整性失败后常用）
+# 手动补跑售前登记（AI 降级/漏跑后常用）
 #
 # 用法:
 #   ./scripts/manual-rerun.sh                 # 默认：昨天
@@ -8,7 +8,7 @@
 #   ./scripts/manual-rerun.sh --dry-run           # 只打日志退出（测服务用）
 #   ./scripts/manual-rerun.sh --help
 #
-# 行为: 优先复用 exports/历史会话按日-DATE.xlsx → to-register（自动重试）→ 飞书；
+# 行为: 优先复用 exports/历史会话按日-DATE.xlsx → to-register（AI 重试后可降级无法判定）→ 飞书；
 #       没有按日 xlsx 时走与 daily-update 相同的 download 全流程。
 set -euo pipefail
 

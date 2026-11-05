@@ -266,7 +266,7 @@ function aiEnv() {
   process.env.QIYU_OS_COOKIE = cookie;
   process.env.QIYU_AI_BASE_URL = 'https://model.test/v1/';
   process.env.QIYU_AI_API_KEY = 'test-ai-key';
-  process.env.QIYU_AI_MODEL = 'gpt-5.6-terra';
+  process.env.QIYU_AI_MODEL = 'gpt-6.1-terra';
 }
 const aiResponse = (content) => Response.json({ choices: [{ message: { content } }] });
 
@@ -281,7 +281,7 @@ test('全部会话仅调用一次模型，high 推理且按会话 ID 对应结�
     assert.equal(options.headers.Authorization, 'Bearer test-ai-key');
     assert.equal(options.redirect, 'error');
     const body = JSON.parse(options.body);
-    assert.equal(body.model, 'gpt-5.6-terra');
+    assert.equal(body.model, 'gpt-6.1-terra');
     assert.equal(body.reasoning_effort, 'high');
     assert.equal(body.stream, false);
     assert.deepEqual(JSON.parse(body.messages[1].content), sessions);
@@ -441,11 +441,68 @@ test('C端标签未知时保留全部会话并统一填无法判断', async (t) 
   assert.equal(summary.cWithUnknownTag, 3);
 });
 
-test('任一模型失败时不查标签、不覆盖已有 CSV', async (t) => {
+test('AI 用尽重试后降级为无法判定，仍查标签并写 CSV', async (t) => {
   aiEnv();
+  process.env.QIYU_REGISTER_MAX_RETRY = '2'; // 共 3 次
+  process.env.QIYU_REGISTER_RETRY_WAIT_MS = '0';
   const write = registerIO(t);
-  const request = t.mock.method(globalThis, 'fetch', async () => new Response('failed', { status: 503 }));
-  await assert.rejects(() => register.main(), /AI/);
-  assert.equal(request.mock.callCount(), 1);
+  const log = t.mock.method(console, 'log', () => {});
+  const err = t.mock.method(console, 'error', () => {});
+  let aiCalls = 0;
+  const request = t.mock.method(globalThis, 'fetch', async (url) => {
+    if (String(url).includes('/chat/completions')) {
+      aiCalls++;
+      return new Response('failed', { status: 503 });
+    }
+    return response([user('1', '疑似C端')]);
+  });
+  await register.main();
+  assert.equal(aiCalls, 3);
+  assert.equal(write.mock.callCount(), 1);
+  const rows = write.mock.calls[0].arguments[1].replace(/^\uFEFF/, '').split('\n').slice(1);
+  assert.equal(rows.length, 3);
+  for (const row of rows) assert.deepEqual(row.split(',').slice(-3), ['', '', '是']);
+  const summary = JSON.parse(log.mock.calls[0].arguments[0]);
+  assert.equal(summary.aiDegraded, true);
+  assert.equal(summary.aiAttempts, 3);
+  assert.deepEqual(summary.aiCustomerCounts, { C端: 0, 无法判定: 3 });
+  assert.ok(err.mock.calls.some((call) => String(call.arguments[0]).includes('degraded=true')));
+  assert.ok(request.mock.callCount() > 3); // AI 3 + OS 标签
+});
+
+test('缺 AI 配置不降级、不写 CSV', async (t) => {
+  delete process.env.QIYU_AI_BASE_URL;
+  delete process.env.QIYU_AI_API_KEY;
+  delete process.env.QIYU_AI_MODEL;
+  process.env.QIYU_REGISTER_MAX_RETRY = '2';
+  process.env.QIYU_REGISTER_RETRY_WAIT_MS = '0';
+  const write = registerIO(t);
+  const request = t.mock.method(globalThis, 'fetch', () => assert.fail('不应请求'));
+  await assert.rejects(() => register.main(), /QIYU_AI/);
+  assert.equal(request.mock.callCount(), 0);
   assert.equal(write.mock.callCount(), 0);
+});
+
+test('classifyCustomersOrDegrade：首次成功不降级；非法 type 重试后降级', async (t) => {
+  aiEnv();
+  process.env.QIYU_REGISTER_MAX_RETRY = '1'; // 共 2 次
+  process.env.QIYU_REGISTER_RETRY_WAIT_MS = '0';
+  const sessions = [{ sessionId: '1', conversation: '访客：自己穿' }];
+  const ok = t.mock.method(globalThis, 'fetch', async () =>
+    aiResponse(JSON.stringify({ results: [{ sessionId: '1', type: 'C端' }] }))
+  );
+  const first = await register.classifyCustomersOrDegrade(sessions);
+  assert.equal(first.degraded, false);
+  assert.equal(first.types.get('1'), 'C端');
+  assert.equal(ok.mock.callCount(), 1);
+  ok.mock.restore();
+
+  const bad = t.mock.method(globalThis, 'fetch', async () =>
+    aiResponse(JSON.stringify({ results: [{ sessionId: '1', type: 'B端' }] }))
+  );
+  const second = await register.classifyCustomersOrDegrade(sessions);
+  assert.equal(second.degraded, true);
+  assert.equal(second.types.get('1'), '无法判定');
+  assert.equal(second.attempts, 2);
+  assert.equal(bad.mock.callCount(), 2);
 });

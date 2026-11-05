@@ -412,6 +412,7 @@ async function downloadTask(start, end) {
 function registerMaxAttempts() {
   const n = Number.parseInt(process.env.QIYU_REGISTER_MAX_RETRY || '2', 10);
   // 额外重试次数，默认 2 → 共 3 次；至少 0
+  // AI 的重试/无法判定降级在 to-register 内完成；此处主要用于 OS 等非 AI 失败。
   return Number.isFinite(n) && n >= 0 ? n + 1 : 3;
 }
 
@@ -423,15 +424,15 @@ function runToRegisterWithRetry(xlsxPath, registerFile) {
     const register = spawnSync(
       process.execPath,
       [path.join(ROOT, 'scripts', 'to-register.mjs'), '--in', xlsxPath, '--out', registerFile],
-      { encoding: 'utf8' }
+      { encoding: 'utf8', env: process.env }
     );
     if (register.status === 0) return register;
     lastErr = (register.stderr || register.stdout || '未知错误').trim();
     console.error(`to-register failed attempt=${attempt}: ${lastErr}`);
-    // 仅对可重试类（AI 完整性 / 批量判断）继续；缺配置等也最多打满 attempts
+    // AI 失败会在子进程内降级为无法判定并成功退出；走到这里多半是 OS/配置等问题。
     if (attempt < attempts) {
       const waitSec = 15 * attempt;
-      console.error(`等待 ${waitSec}s 后重试 AI 登记…`);
+      console.error(`等待 ${waitSec}s 后重试登记…`);
       spawnSync('sleep', [String(waitSec)]);
     }
   }

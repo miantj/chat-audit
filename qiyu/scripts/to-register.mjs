@@ -4,6 +4,10 @@
  * AI咨询分类：优先文档「11. 分类」关键词；无法判断/无关键词 → 七鱼路径的三级分类
  * 七鱼咨询分类：仅展示七鱼路径的三级分类
  * 是否疑似c端：按用户 ID 批量查询 OS 的 looklike_c_user.label；无 ID/查无用户留空
+ * AI 仅输出 C端/无法判定，再与疑似标签合成三列勾选：
+ *   没有疑似c端标签但是是c端 / 有疑似c端标签确认是c端 / 无法判断
+ * AI HTTP/完整性失败时按 QIYU_REGISTER_MAX_RETRY（默认额外 2 次，共 3 次）重试；
+ * 用尽后降级：全部会话 type=无法判定，仍写 CSV（不阻断飞书）。
  *
  *   node scripts/to-register.mjs
  *   node scripts/to-register.mjs --in exports/xxx.xlsx --out exports/售前登记.csv
@@ -36,7 +40,7 @@ export const REGISTER_HEADERS = [
 ];
 
 const CUSTOMER_TYPES = ['C端', '无法判定'];
-const CUSTOMER_PROMPT = `你仅根据每条会话本身的聊天内容，独立判断能否确认访客本次为 C端。
+const CUSTOMER_PROMPT = `你只做一件事：根据每条会话聊天内容，判断能否确认访客本次为 C端（用于后续三列勾选：无标签但是是C端 / 有标签确认是C端 / 无法判断）。不要做咨询分类，不要输出其它业务类别。
 C端：个人自用，买来自己穿或送人，不以售卖盈利为目的，没有经营卖货需求。
 无法判定：不能确认本次为个人自用，包括明确拿货用于售卖、经营的会话；这类会话也统一归入无法判定，不另设类别。
 判断规则：
@@ -64,7 +68,7 @@ export async function classifyCustomers(sessions) {
   }
   let status;
   try {
-    // shortcut: 全部会话单请求，不拆批、不截断、不重试；超出模型容量时需显式调整模型或输入日期范围。
+    // 单次请求：不拆批、不截断；重试与「无法判定」降级由 classifyCustomersOrDegrade 负责。
     const res = await fetch(`${base.trim().replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
       redirect: 'error',
@@ -95,8 +99,57 @@ export async function classifyCustomers(sessions) {
     return types;
   } catch {
     // 不输出模型响应、聊天内容或网络异常，避免泄露会话及密钥。
-    throw new Error(`AI 批量判断失败${status ? `（HTTP ${status}）` : ''}：请检查服务、模型及结果完整性；停止生成登记`);
+    throw new Error(`AI 批量判断失败${status ? `（HTTP ${status}）` : ''}：请检查服务、模型及结果完整性`);
   }
+}
+
+/** QIYU_REGISTER_MAX_RETRY=额外重试次数，默认 2 → 共 3 次。 */
+export function registerMaxAttempts() {
+  const n = Number.parseInt(process.env.QIYU_REGISTER_MAX_RETRY || '2', 10);
+  return Number.isFinite(n) && n >= 0 ? n + 1 : 3;
+}
+
+export function degradedCustomerTypes(sessions) {
+  return new Map(sessions.map((session) => [session.sessionId, '无法判定']));
+}
+
+function retryWaitMs(attempt) {
+  const override = Number.parseInt(process.env.QIYU_REGISTER_RETRY_WAIT_MS || '', 10);
+  if (Number.isFinite(override) && override >= 0) return override;
+  return 15_000 * attempt;
+}
+
+/**
+ * AI 判定：可重试；用尽后仅降级为无法判定（不乱标其它类别），其它流程照常。
+ * 缺配置 / 输入非法仍直接抛错，不降级。
+ */
+export async function classifyCustomersOrDegrade(sessions) {
+  if (!sessions.length) return { types: new Map(), degraded: false, attempts: 0 };
+  const attempts = registerMaxAttempts();
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const types = await classifyCustomers(sessions);
+      return { types, degraded: false, attempts: attempt };
+    } catch (error) {
+      lastError = error;
+      const message = error?.message || String(error);
+      // 配置或输入问题重试无意义，也不应整批降级掩盖。
+      if (/QIYU_AI_|缺少有效会话 ID/.test(message)) throw error;
+      console.error(`AI classify attempt ${attempt}/${attempts} failed: ${message}`);
+      if (attempt < attempts) {
+        const waitMs = retryWaitMs(attempt);
+        if (waitMs > 0) {
+          console.error(`等待 ${Math.round(waitMs / 1000)}s 后重试 AI…`);
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+      }
+    }
+  }
+  console.error(
+    `AI 判定降级 degraded=true：${attempts} 次失败后全部标为无法判定（${lastError?.message || 'unknown'}）`
+  );
+  return { types: degradedCustomerTypes(sessions), degraded: true, attempts };
 }
 
 export function customerChecks(type, suspectC) {
@@ -321,7 +374,11 @@ export async function main() {
     sessionId: String(byHeader(hdr, row, '会话ID')),
     ...parseContent(byHeader(hdr, row, '会话内容'), rawUserIds[index], byHeader(hdr, row, '访客用户名'))
   }));
-  const customerTypes = await classifyCustomers(sessions);
+  const {
+    types: customerTypes,
+    degraded: aiDegraded,
+    attempts: aiAttempts
+  } = await classifyCustomersOrDegrade(sessions);
   const suspectCByUserId = await getSuspectCByUserId(rawUserIds);
   const suspectCCounts = { 是: 0, 否: 0, 未知: 0 };
   const aiCustomerCounts = { C端: 0, 无法判定: 0 };
@@ -387,6 +444,8 @@ export async function main() {
         suspectCCounts,
         aiCustomerModel: process.env.QIYU_AI_MODEL,
         aiCustomerCounts,
+        aiDegraded,
+        aiAttempts,
         cWithUnknownTag
       },
       null,
